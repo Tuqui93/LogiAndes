@@ -1,15 +1,11 @@
 """
-LogiAndes S.A. · Solución de Business Intelligence Accionable (Prueba Práctica 2)
-Materia: Visualización, Storytelling y Business Intelligence
-Analista responsable (Caso): Camila Andrade
-
-Ejecutar:  streamlit run LogiAndes.py
-"""
+LogiAndes S.A. · Solución de Business Intelligence
 
 import hashlib
 import inspect
 import io
 import re
+import time
 import unicodedata
 from datetime import timedelta
 from pathlib import Path
@@ -24,10 +20,10 @@ import streamlit as st
 # 1. CONFIGURACIÓN DE PÁGINA
 # ==========================================
 st.set_page_config(
-    page_title="LogiAndes S.A. · BI Dashboard",
-    page_icon="📊",
+    page_title="LogiAndes S.A. · BI Suite",
+    page_icon="💡",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 
@@ -46,111 +42,208 @@ AN_PLOT = _kw_ancho(st.plotly_chart)
 AN_DF = _kw_ancho(st.dataframe)
 AN_BTN = _kw_ancho(st.button)
 
+# ==========================================
+# 2. ESTADO REACTIVO: ADAPTACIÓN DE LampLoginAnimation
+# ==========================================
+# Equivalente en Python/Streamlit a:
+# const [email, setEmail] = useState('');
+# const [password, setPassword] = useState('');
+# const [showPassword, setShowPassword] = useState(false);
+# const [isLoading, setIsLoading] = useState(false);
+# const [lampOn, setLampOn] = useState(false);
+for k_state, v_def in {
+    "email": "camila.andrade@logiandes.ec",
+    "password": "",
+    "showPassword": False,
+    "isLoading": False,
+    "lampOn": True,
+    "authenticated": False,
+}.items():
+    if k_state not in st.session_state:
+        st.session_state[k_state] = v_def
+
 
 # ==========================================
-# 2. ESTILOS Y NAVEGACIÓN FLUIDA (PILL TABS)
+# 3. ESTILOS VISUALES: LAMP EFFECT + SIDEBAR TABS + PILL NAV
 # ==========================================
-def inyectar_estilos(tema_nav: str):
-    """Inyecta CSS con la barra de navegación fluida tipo cápsula e indicadores de estado."""
-    temas = {
-        "Oscuro Neón": {
-            "bar_bg": "linear-gradient(145deg, #18181b 0%, #111115 100%)",
-            "bar_border": "1px solid rgba(255, 255, 255, 0.09)",
-            "bar_shadow": "0 14px 32px rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.18)",
-            "tab_color": "#a1a1aa",
-            "tab_hover_bg": "rgba(255, 255, 255, 0.06)",
-            "tab_hover_color": "#f4f4f5",
-            "active_bg": "radial-gradient(circle at 50% 0%, rgba(225, 29, 72, 0.30) 0%, rgba(225, 29, 72, 0.06) 75%)",
-            "active_color": "#ffffff",
-            "active_shadow": "inset 0 2.5px 0 0 #f43f5e, 0 0 18px rgba(244, 63, 94, 0.35)",
-            "dot_color": "#f43f5e",
-        },
-        "Cápsula Clara": {
-            "bar_bg": "#ffffff",
-            "bar_border": "1px solid rgba(226, 232, 240, 0.95)",
-            "bar_shadow": "0 12px 28px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.04)",
-            "tab_color": "#64748b",
-            "tab_hover_bg": "#f1f5f9",
-            "tab_hover_color": "#0f172a",
-            "active_bg": "linear-gradient(135deg, #d90429 0%, #ef233c 100%)",
-            "active_color": "#ffffff",
-            "active_shadow": "0 6px 16px rgba(217, 4, 41, 0.32)",
-            "dot_color": "#ffffff",
-        },
-        "Rojo Vibrante": {
-            "bar_bg": "linear-gradient(135deg, #c1121f 0%, #dc2626 100%)",
-            "bar_border": "1px solid rgba(255, 255, 255, 0.2)",
-            "bar_shadow": "0 14px 30px rgba(220, 38, 38, 0.30)",
-            "tab_color": "rgba(255, 255, 255, 0.82)",
-            "tab_hover_bg": "rgba(255, 255, 255, 0.12)",
-            "tab_hover_color": "#ffffff",
-            "active_bg": "rgba(255, 255, 255, 0.24)",
-            "active_color": "#ffffff",
-            "active_shadow": "0 4px 14px rgba(0, 0, 0, 0.16), inset 0 1px 1px rgba(255, 255, 255, 0.35)",
-            "dot_color": "#ffffff",
-        },
-    }
-    t = temas.get(tema_nav, temas["Oscuro Neón"])
+def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
+    """Inyecta el diseño inspirado en LampLoginAnimation y las pestañas fluidas."""
+    # Cuando lampOn es True, se enciende el haz de luz cónico superior y el resplandor de tarjetas
+    lamp_beam_opacity = "1" if lamp_on else "0.08"
+    lamp_fixture_glow = f"0 0 28px {color_acento}, 0 0 60px {color_acento}" if lamp_on else "none"
+    lamp_cone_bg = (
+        f"conic-gradient(from 180deg at 50% 0%, transparent 130deg, {color_acento}33 165deg, "
+        f"{color_acento}66 180deg, {color_acento}33 195deg, transparent 230deg)"
+        if lamp_on
+        else "transparent"
+    )
+    card_border = f"rgba(244, 63, 94, 0.28)" if lamp_on else "rgba(148, 163, 184, 0.16)"
+    card_shadow = (
+        "0 10px 30px -10px rgba(244, 63, 94, 0.14), 0 4px 12px rgba(0, 0, 0, 0.06)"
+        if lamp_on
+        else "0 4px 12px rgba(0, 0, 0, 0.04)"
+    )
 
     st.markdown(
         f"""
         <style>
             .block-container {{
-                padding-top: 1.3rem;
+                padding-top: 1.1rem;
                 padding-bottom: 2.5rem;
-                max-width: 1440px;
+                max-width: 1460px;
             }}
 
-            .top-header {{
+            /* =====================================================
+               1. LÁMPARA REACTIVA SUPERIOR (LampLoginAnimation UI)
+               ===================================================== */
+            .lamp-wrapper {{
+                position: relative;
+                width: 100%;
+                border-radius: 22px;
+                background: linear-gradient(180deg, #090a0f 0%, #12131c 100%);
+                border: 1px solid rgba(255, 255, 255, 0.09);
+                padding: 1.55rem 1.8rem 1.35rem 1.8rem;
+                margin-bottom: 1.1rem;
+                overflow: hidden;
+                box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32);
+                color: #f8fafc;
+            }}
+
+            /* Foco físico de la lámpara en el techo del banner */
+            .lamp-bulb {{
+                width: 140px;
+                height: 6px;
+                background: {color_acento if lamp_on else '#3f3f46'};
+                margin: -1.55rem auto 0.9rem auto;
+                border-radius: 0 0 12px 12px;
+                box-shadow: {lamp_fixture_glow};
+                transition: all 0.45s ease;
+                position: relative;
+                z-index: 3;
+            }}
+
+            /* Haz de luz cónico animado */
+            .lamp-cone {{
+                position: absolute;
+                top: -10px;
+                left: 50%;
+                transform: translateX(-50%);
+                width: 680px;
+                height: 260px;
+                background: {lamp_cone_bg};
+                filter: blur(22px);
+                opacity: {lamp_beam_opacity};
+                pointer-events: none;
+                transition: all 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+                z-index: 1;
+            }}
+
+            .lamp-content {{
+                position: relative;
+                z-index: 2;
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
                 flex-wrap: wrap;
-                gap: 0.75rem;
-                margin-bottom: 0.55rem;
+                gap: 1rem;
             }}
-            .brand-box {{
-                display: flex;
-                align-items: center;
-                gap: 0.75rem;
-            }}
-            .brand-badge {{
-                background: linear-gradient(135deg, #2563EB, #1D4ED8);
-                color: white;
-                font-weight: 800;
-                font-size: 1.2rem;
-                width: 42px;
-                height: 42px;
-                border-radius: 12px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28);
-            }}
-            .main-title {{
-                font-size: 1.6rem;
+
+            .lamp-title {{
+                font-size: 1.55rem;
                 font-weight: 800;
                 letter-spacing: -0.02em;
                 margin: 0;
-                line-height: 1.15;
-            }}
-            .sub-title {{
-                font-size: 0.85rem;
-                opacity: 0.75;
-                margin: 0;
+                color: #ffffff;
             }}
 
-            /* BARRA DE NAVEGACIÓN FLUIDA (PILL NAVIGATION TABS) */
+            .lamp-subtitle {{
+                font-size: 0.86rem;
+                color: #cbd5e1;
+                margin-top: 0.2rem;
+            }}
+
+            .area-badge {{
+                background: rgba(255, 255, 255, 0.08);
+                border: 1px solid {color_acento};
+                color: #ffffff;
+                padding: 0.42rem 1rem;
+                border-radius: 999px;
+                font-size: 0.82rem;
+                font-weight: 700;
+                box-shadow: 0 0 16px {color_acento}44;
+                backdrop-filter: blur(8px);
+            }}
+
+            /* =====================================================
+               2. PESTAÑAS LATERALES IZQUIERDAS (ÁREAS DE LA EMPRESA)
+               ===================================================== */
+            section[data-testid="stSidebar"] > div {{
+                padding-top: 1rem;
+            }}
+
+            /* Convertir el radio de áreas en pestañas verticales estilizadas */
+            section[data-testid="stSidebar"] div[role="radiogroup"] {{
+                gap: 0.42rem !important;
+                width: 100% !important;
+            }}
+
+            section[data-testid="stSidebar"] div[role="radiogroup"] > label {{
+                background: rgba(148, 163, 184, 0.08) !important;
+                border: 1px solid rgba(148, 163, 184, 0.16) !important;
+                border-radius: 12px !important;
+                padding: 0.62rem 0.9rem !important;
+                width: 100% !important;
+                margin: 0 !important;
+                cursor: pointer !important;
+                transition: all 0.24s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+                display: flex !important;
+                align-items: center !important;
+            }}
+
+            /* Ocultar el círculo nativo del radio para que luzca como pestaña lateral */
+            section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {{
+                display: none !important;
+            }}
+
+            section[data-testid="stSidebar"] div[role="radiogroup"] > label p {{
+                font-size: 0.88rem !important;
+                font-weight: 600 !important;
+                margin: 0 !important;
+            }}
+
+            section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover {{
+                background: rgba(244, 63, 94, 0.12) !important;
+                border-color: rgba(244, 63, 94, 0.45) !important;
+                transform: translateX(4px) !important;
+            }}
+
+            /* Pestaña lateral activa */
+            section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {{
+                background: linear-gradient(135deg, #e11d48 0%, #be123c 100%) !important;
+                border-color: #fda4af !important;
+                color: #ffffff !important;
+                box-shadow: 0 6px 18px rgba(225, 29, 72, 0.35) !important;
+                transform: translateX(6px) !important;
+            }}
+
+            section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) p {{
+                color: #ffffff !important;
+                font-weight: 700 !important;
+            }}
+
+            /* =====================================================
+               3. NAVEGACIÓN SUPERIOR FLUIDA (CÁPSULA CON ARCO DE LUZ)
+               ===================================================== */
             div[data-testid="stTabs"] > div[role="tablist"] {{
-                background: {t["bar_bg"]} !important;
-                border: {t["bar_border"]} !important;
-                box-shadow: {t["bar_shadow"]} !important;
+                background: linear-gradient(145deg, #141419 0%, #0d0d11 100%) !important;
+                border: 1px solid rgba(255, 255, 255, 0.1) !important;
+                box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28) !important;
                 border-radius: 999px !important;
-                padding: 0.42rem 0.55rem !important;
-                gap: 0.4rem !important;
+                padding: 0.42rem 0.6rem !important;
+                gap: 0.45rem !important;
                 width: fit-content !important;
                 max-width: 100% !important;
-                margin: 0.3rem auto 1.15rem auto !important;
+                margin: 0.2rem auto 1.15rem auto !important;
                 display: flex !important;
                 justify-content: center !important;
                 align-items: center !important;
@@ -164,12 +257,12 @@ def inyectar_estilos(tema_nav: str):
 
             div[data-testid="stTabs"] button[role="tab"] {{
                 border-radius: 999px !important;
-                padding: 0.52rem 1.45rem !important;
-                min-width: 135px !important;
+                padding: 0.55rem 1.5rem !important;
+                min-width: 145px !important;
                 height: auto !important;
-                border: none !important;
+                border: 1px solid transparent !important;
                 background: transparent !important;
-                color: {t["tab_color"]} !important;
+                color: #9ca3af !important;
                 transition: all 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
                 position: relative !important;
                 display: flex !important;
@@ -188,45 +281,47 @@ def inyectar_estilos(tema_nav: str):
             }}
 
             div[data-testid="stTabs"] button[role="tab"]:hover {{
-                background: {t["tab_hover_bg"]} !important;
-                color: {t["tab_hover_color"]} !important;
+                background: rgba(255, 255, 255, 0.05) !important;
+                color: #f8fafc !important;
                 transform: translateY(-1px) !important;
             }}
 
+            /* Pestaña activa con arco luminoso estilo "Create" de la imagen */
             div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{
-                background: {t["active_bg"]} !important;
-                color: {t["active_color"]} !important;
-                box-shadow: {t["active_shadow"]} !important;
+                background: radial-gradient(circle at 50% 0%, {color_acento}4d 0%, {color_acento}12 75%) !important;
+                border-top: 2px solid {color_acento} !important;
+                color: #ffffff !important;
+                box-shadow: 0 -4px 16px {color_acento}44, inset 0 2px 8px {color_acento}33 !important;
                 transform: scale(1.03) !important;
             }}
 
             div[data-testid="stTabs"] button[role="tab"][aria-selected="true"]::after {{
                 content: "";
-                width: 5px;
-                height: 5px;
+                width: 6px;
+                height: 6px;
                 border-radius: 50%;
-                background: {t["dot_color"]};
+                background: {color_acento};
                 position: absolute;
                 bottom: 5px;
                 left: 50%;
                 transform: translateX(-50%);
-                box-shadow: 0 0 6px {t["dot_color"]};
+                box-shadow: 0 0 8px {color_acento};
             }}
 
-            @keyframes fadeSlideUp {{
-                from {{ opacity: 0; transform: translateY(8px); }}
-                to {{ opacity: 1; transform: translateY(0); }}
-            }}
-            div[data-testid="stTabs"] div[role="tabpanel"] {{
-                animation: fadeSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+            /* Contenedores iluminados sutilmente cuando la lámpara está encendida */
+            div[data-testid="stVerticalBlockBorderWrapper"] {{
+                border-color: {card_border} !important;
+                box-shadow: {card_shadow} !important;
+                border-radius: 14px !important;
+                transition: all 0.35s ease !important;
             }}
 
             .semaforo-pill {{
                 display: inline-block;
-                padding: 0.15rem 0.55rem;
+                padding: 0.16rem 0.6rem;
                 border-radius: 999px;
                 font-size: 0.72rem;
-                font-weight: 600;
+                font-weight: 700;
                 margin-top: 0.2rem;
             }}
         </style>
@@ -236,7 +331,7 @@ def inyectar_estilos(tema_nav: str):
 
 
 # ==========================================
-# 3. MODELO DE DATOS: LECTURA, ALIAS Y LIMPIEZA
+# 4. MODELO DE DATOS: LECTURA, ALIAS Y LIMPIEZA
 # ==========================================
 CAMPOS_CORE = ["Provincia", "Canal", "Venta_Neta", "Margen_Bruto", "Hubo_Reclamo", "Entrega_A_Tiempo"]
 CAMPOS_OPCIONALES = ["Fecha", "Ciudad", "Linea_Servicio", "Tiempo_Entrega", "Meta_Venta"]
@@ -447,24 +542,122 @@ def preparar_datos(_df: pd.DataFrame, huella: str, mapeo: tuple, margen_es_pct: 
 
 
 # ==========================================
-# 4. BARRA LATERAL: ORIGEN DE DATOS Y ESTILO
+# 5. DEFINICIÓN DE LAS 5 ÁREAS EMPRESARIALES (LATERAL IZQUIERDO)
+# ==========================================
+AREAS_EMPRESA = {
+    "🌐 Todas las áreas · Vista Integral": {
+        "color": "#f43f5e",
+        "rol": "Vista Consolidada Corporativa · Camila Andrade (BI Analyst)",
+        "objetivo": "Integrar ventas netas, margen bruto, cumplimiento comercial, tasa de reclamos y tiempos de entrega en una sola fuente de verdad.",
+        "kpis_foco": ["venta", "margen_pct", "cumplimiento", "reclamos", "otd"],
+    },
+    "🏢 Gerencia General": {
+        "color": "#3b82f6",
+        "rol": "Gerente General · Monitoreo Estratégico",
+        "objetivo": "Supervisar si LogiAndes S.A. cumple sus metas mensuales por provincia y evaluar el desempeño general sin sesgos de volumen.",
+        "kpis_foco": ["cumplimiento", "venta", "margen_pct", "otd"],
+    },
+    "📈 Dirección Comercial": {
+        "color": "#f59e0b",
+        "rol": "Directora Comercial · Desempeño Territorial y Canales",
+        "objetivo": "Analizar ventas netas y alcance de cuotas filtrando por provincia, ciudad, canal de distribución y línea de servicio.",
+        "kpis_foco": ["venta", "cumplimiento", "margen_pct"],
+    },
+    "🚚 Gerencia de Operaciones": {
+        "color": "#10b981",
+        "rol": "Gerente de Operaciones · Eficiencia y Variabilidad Logística",
+        "objetivo": "Identificar provincias o canales con retrasos (bajo OTD) o alta dispersión en tiempos de entrega (P90 y Coeficiente de Variación).",
+        "kpis_foco": ["otd", "reclamos"],
+    },
+    "💰 Área Financiera": {
+        "color": "#8b5cf6",
+        "rol": "Gerencia Financiera · Rentabilidad y Criterio Neto",
+        "objetivo": "Garantizar que el seguimiento utilice Ventas Netas (no brutas) y monitorear el Margen Bruto real descontando costos logísticos.",
+        "kpis_foco": ["venta", "margen_pct", "cumplimiento"],
+    },
+    "🎧 Atención al Cliente": {
+        "color": "#ec4899",
+        "rol": "Jefatura de Servicio al Cliente · Calidad de Entrega",
+        "objetivo": "Evaluar la tasa estandarizada de reclamos por cada 1.000 pedidos para comparar justamente plazas grandes y medianas.",
+        "kpis_foco": ["reclamos", "otd"],
+    },
+}
+
+# ==========================================
+# 6. BARRA LATERAL IZQUIERDA: PESTAÑAS DE ÁREAS + LAMP LOGIN COMPONENT
 # ==========================================
 CARPETA_DEFECTO = Path(__file__).resolve().parent
 
-st.sidebar.title("🚚 LogiAndes S.A.")
-st.sidebar.caption("Sistema de Inteligencia de Negocios")
+st.sidebar.markdown("### 🚚 LogiAndes S.A. · BI")
+st.sidebar.caption("Selecciona el área empresarial para adaptar el enfoque del tablero:")
 
-with st.sidebar.expander("🎨 Estilo de navegación", expanded=True):
-    tema_nav = st.radio(
-        "Diseño de la barra de navegación",
-        ["Oscuro Neón", "Cápsula Clara", "Rojo Vibrante"],
-        index=0,
+# 6.1 PESTAÑAS LATERALES DE LAS ÁREAS DE LA EMPRESA
+area_activa = st.sidebar.radio(
+    "🏢 Áreas de la Empresa",
+    list(AREAS_EMPRESA.keys()),
+    index=0,
+    label_visibility="collapsed",
+    key="nav_area_lateral",
+)
+info_area = AREAS_EMPRESA[area_activa]
+
+st.sidebar.divider()
+
+# 6.2 COMPONENTE LampLoginAnimation ADAPTADO AL SIDEBAR (Gobernanza & Luz Reactiva)
+with st.sidebar.expander("💡 Lamp Login · Gobernanza", expanded=False):
+    st.caption("Adaptación interactiva de `LampLoginAnimation` (Control de iluminación y acceso a datos sensibles):")
+
+    # Switch directo de la lámpara (const [lampOn, setLampOn] = useState(false))
+    st.session_state["lampOn"] = st.toggle(
+        "Encender lámpara del Dashboard (`lampOn`)",
+        value=st.session_state["lampOn"],
     )
 
-inyectar_estilos(tema_nav)
+    st.session_state["email"] = st.text_input(
+        "Correo corporativo (`email`)",
+        value=st.session_state["email"],
+        placeholder="usuario@logiandes.ec",
+    )
 
+    # Botón Eye / EyeOff (import { Eye, EyeOff } from 'lucide-react')
+    c_pass, c_eye = st.columns([3.8, 1.2], vertical_alignment="bottom")
+    with c_eye:
+        icono_ojo = "🙈" if st.session_state["showPassword"] else "👁️"
+        if st.button(icono_ojo, key="btn_eye", help="Mostrar / ocultar contraseña (Eye / EyeOff)", **AN_BTN):
+            st.session_state["showPassword"] = not st.session_state["showPassword"]
+            st.rerun()
+    with c_pass:
+        st.session_state["password"] = st.text_input(
+            "Clave de auditor (`password`)",
+            value=st.session_state["password"],
+            type="default" if st.session_state["showPassword"] else "password",
+            placeholder="Ingresa cualquier clave…",
+        )
+
+    # Equivalente a handleSubmit = (e) => { setIsLoading(true); setLampOn(true); ... }
+    if st.button("⚡ Activar Modo Auditor (`handleSubmit`)", key="btn_lamp_submit", **AN_BTN):
+        st.session_state["isLoading"] = True
+        st.session_state["lampOn"] = True  # Turn on lamp
+        with st.spinner("Encendiendo lámpara y verificando permisos (2s)…"):
+            time.sleep(0.8)
+        st.session_state["isLoading"] = False
+        st.session_state["authenticated"] = True
+        st.rerun()
+
+    if st.session_state["authenticated"]:
+        st.success(f"🔓 Auditor activo: {st.session_state['email']}")
+        if st.button("🔒 Cerrar sesión de auditor", key="btn_logout", **AN_BTN):
+            st.session_state["authenticated"] = False
+            st.rerun()
+    else:
+        st.caption("🔒 Vista estándar: columnas sensibles de vendedores/clientes protegidas.")
+
+# Inyectar el CSS con el estado actual de lampOn y el color del área seleccionada
+inyectar_estilos_lamp(st.session_state["lampOn"], info_area["color"])
+
+# 6.3 ORIGEN DE DATOS EN LA BARRA LATERAL
 contenido, nombre_archivo = None, ""
-with st.sidebar.expander("⚙️ Origen de datos", expanded=True):
+with st.sidebar.expander("⚙️ Origen de datos (CSV)", expanded=True):
     carpeta = Path(st.text_input("Carpeta de datos", value=str(CARPETA_DEFECTO))).expanduser()
     subido = st.file_uploader("…o sube un CSV", type=["csv"], key="up_side")
     if subido is not None:
@@ -475,22 +668,33 @@ with st.sidebar.expander("⚙️ Origen de datos", expanded=True):
             nombre_archivo = st.selectbox("Archivo", archivos)
             contenido = (carpeta / nombre_archivo).read_bytes()
 
-if contenido is None:
-    st.markdown(
-        """
-        <div class='top-header'>
-            <div class='brand-box'>
-                <div class='brand-badge'>LA</div>
-                <div>
-                    <div class='main-title'>LogiAndes S.A. · Sistema de Inteligencia de Negocios</div>
-                    <div class='sub-title'>De visualizaciones aisladas a decisiones monitoreables</div>
+# ==========================================
+# 7. ENCABEZADO PRINCIPAL CON EL EFECTO DE LÁMPARA (LampLoginAnimation)
+# ==========================================
+estado_luz_txt = "💡 Lámpara encendida" if st.session_state["lampOn"] else "🌑 Lámpara apagada"
+st.markdown(
+    f"""
+    <div class='lamp-wrapper'>
+        <div class='lamp-bulb'></div>
+        <div class='lamp-cone'></div>
+        <div class='lamp-content'>
+            <div>
+                <div class='lamp-title'>LogiAndes S.A. · Sistema de Inteligencia de Negocios</div>
+                <div class='lamp-subtitle'>
+                    <b>{info_area["rol"]}</b> — {info_area["objetivo"]}
                 </div>
             </div>
+            <div class='area-badge'>
+                {area_activa} · {estado_luz_txt}
+            </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.warning(f"No encontré archivos CSV en `{carpeta}`. Sube el dataset de LogiAndes aquí:")
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if contenido is None:
+    st.warning(f"No encontré archivos CSV en `{carpeta}`. Sube el archivo de datos de LogiAndes aquí:")
     subido_main = st.file_uploader("Sube tu CSV", type=["csv"], key="up_main")
     if subido_main is None:
         st.stop()
@@ -544,7 +748,7 @@ META_REPETIDA = st.session_state.get(
 df_base = preparar_datos(df_raw, huella, tuple(sorted(mapeo.items())), margen_es_pct)
 
 # ==========================================
-# 5. CABECERA Y FILTROS TRANSVERSALES (DOSIFICADOS)
+# 8. FILTROS GLOBALES DOSIFICADOS (EVITA SOBREINTERACTIVIDAD)
 # ==========================================
 CLAVES_FILTROS = ["f_preset", "f_rango", "f_prov", "f_canal", "f_ciudad", "f_linea"]
 
@@ -568,29 +772,13 @@ def aplicar(df: pd.DataFrame, col: str, seleccion: list) -> pd.DataFrame:
 df_filtrado = df_base.copy()
 resumen_filtros = []
 
-st.markdown(
-    f"""
-    <div class='top-header'>
-        <div class='brand-box'>
-            <div class='brand-badge'>LA</div>
-            <div>
-                <div class='main-title'>LogiAndes S.A. · Monitoreo de Desempeño e Inteligencia de Negocios</div>
-                <div class='sub-title'>Cobertura: Quito, Guayaquil, Cuenca, Manta, Ambato y Loja · Fuente activa: <b>{nombre_archivo}</b></div>
-            </div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 if faltan_core:
     st.warning(
         "⚠️ Faltan columnas principales por asignar: **"
         + ", ".join(faltan_core)
-        + "**. Ve a la pestaña **📋 Ficha BI & Gobernanza** para mapearlas."
+        + "**. Ve a la pestaña **📋 4. Ficha BI & Gobernanza** para mapearlas."
     )
 
-# Filtros principales (Nivel global: Periodo, Provincia, Canal) para evitar sobreinteractividad
 with st.container(border=True):
     f1, f2, f3, f4 = st.columns([1.25, 2.1, 1.65, 0.55], vertical_alignment="top")
 
@@ -644,9 +832,8 @@ with st.container(border=True):
 
 pct = len(df_filtrado) / max(len(df_base), 1)
 st.caption(
-    f"📊 Mostrando **{len(df_filtrado):,}** de {len(df_base):,} pedidos ({pct:.0%})"
-    + (" · Filtros globales activos: " + " | ".join(resumen_filtros) if resumen_filtros else " · Vista nacional consolidada")
-    + " · *(Los filtros específicos de Ciudad y Línea de Servicio se encuentran en las vistas Territorial y Operativa para evitar sobreinteractividad)*."
+    f"📄 Archivo: **{nombre_archivo}** · Mostrando **{len(df_filtrado):,}** de {len(df_base):,} pedidos ({pct:.0%}) "
+    + ("· Filtros activos: " + " | ".join(resumen_filtros) if resumen_filtros else "· Sin filtros globales")
 )
 
 if df_filtrado.empty:
@@ -658,7 +845,7 @@ d = df_filtrado
 HAY_FILTROS = len(d) != len(base)
 
 # ==========================================
-# 6. FUNCIONES DE CÁLCULO, SEMÁFOROS Y FICHA TÉCNICA DE KPIS
+# 9. FUNCIONES DE CÁLCULO, SEMÁFOROS Y FICHA TÉCNICA DE KPIS
 # ==========================================
 NOMBRE_VISIBLE = {"AñoMes": "Fecha"}
 
@@ -666,12 +853,12 @@ NOMBRE_VISIBLE = {"AñoMes": "Fecha"}
 def necesita(x: pd.DataFrame, cols) -> bool:
     falta = [NOMBRE_VISIBLE.get(c, c) for c in cols if c not in x.columns]
     if falta:
-        st.info(f"Para este gráfico falta: **{', '.join(falta)}**. Configúrala en **📋 Ficha BI & Gobernanza**.")
+        st.info(f"Para este gráfico falta: **{', '.join(falta)}**. Configúrala en **📋 4. Ficha BI & Gobernanza**.")
         return False
     return True
 
 
-def mostrar(fig, clave: str, alto: int = 370):
+def mostrar(fig, clave: str, alto: int = 365):
     fig.update_layout(height=alto, margin=dict(l=10, r=10, t=28, b=10), legend_title_text="")
     st.plotly_chart(fig, key=clave, config={"displaylogo": False}, **AN_PLOT)
 
@@ -726,33 +913,34 @@ def calcular_kpis(x: pd.DataFrame) -> dict:
 
 
 def evaluar_umbral(valor, verde, amarillo, menor_es_mejor=False):
-    """Evalúa el estado del KPI según umbrales de la ficha técnica."""
     if valor is None or pd.isna(valor):
         return "⚪ Sin dato", "#64748b", "rgba(100,116,139,0.12)"
     if not menor_es_mejor:
         if valor >= verde:
-            return "🟢 Óptimo (En meta)", "#16a34a", "rgba(22,163,74,0.12)"
+            return "🟢 Óptimo (En meta)", "#16a34a", "rgba(22,163,74,0.14)"
         if valor >= amarillo:
-            return "🟡 Alerta (Seguimiento)", "#d97706", "rgba(217,119,6,0.12)"
-        return "🔴 Crítico (Acción requerida)", "#dc2626", "rgba(220,38,38,0.12)"
+            return "🟡 Alerta (Seguimiento)", "#d97706", "rgba(217,119,6,0.14)"
+        return "🔴 Crítico (Acción)", "#dc2626", "rgba(220,38,38,0.14)"
     else:
         if valor <= verde:
-            return "🟢 Óptimo (Controlado)", "#16a34a", "rgba(22,163,74,0.12)"
+            return "🟢 Óptimo (Controlado)", "#16a34a", "rgba(22,163,74,0.14)"
         if valor <= amarillo:
-            return "🟡 Alerta (Atención)", "#d97706", "rgba(217,119,6,0.12)"
-        return "🔴 Crítico (Excede umbral)", "#dc2626", "rgba(220,38,38,0.12)"
+            return "🟡 Alerta (Atención)", "#d97706", "rgba(217,119,6,0.14)"
+        return "🔴 Crítico (Excede umbral)", "#dc2626", "rgba(220,38,38,0.14)"
 
 
-def tarjeta_kpi(col, etiqueta, valor, fmt, ref=None, inverso=False, ayuda="", unidad="", sem=None):
+def tarjeta_kpi(col, clave_kpi, etiqueta, valor, fmt, ref=None, inverso=False, ayuda="", unidad="", sem=None):
+    es_foco = clave_kpi in info_area["kpis_foco"]
+    prefijo = "⭐ " if (es_foco and area_activa != "🌐 Todas las áreas · Vista Integral") else ""
     with col.container(border=True):
         if valor is None or pd.isna(valor):
-            st.metric(etiqueta, "N/D", help=ayuda or "Falta la columna necesaria para este KPI.")
+            st.metric(prefijo + etiqueta, "N/D", help=ayuda or "Falta la columna necesaria para este KPI.")
             return
         delta = None
         if HAY_FILTROS and ref is not None and not pd.isna(ref):
             delta = f"{valor - ref:+,.1f}{unidad} vs. nacional"
         st.metric(
-            etiqueta,
+            prefijo + etiqueta,
             fmt.format(valor),
             delta=delta,
             delta_color="inverse" if inverso else "normal",
@@ -769,138 +957,156 @@ def tarjeta_kpi(col, etiqueta, valor, fmt, ref=None, inverso=False, ayuda="", un
 K = calcular_kpis(d)
 K0 = calcular_kpis(base)
 
-# FICHA TÉCNICA COMPLETA DE LOS 5 KPIS (Cumple los 9 atributos exigidos en la Prueba Práctica 2)
 FICHA_TECNICA_KPIS = pd.DataFrame([
     {
         "Nombre del Indicador": "1. Ventas Netas (US$)",
+        "Área Principal": "Finanzas / Comercial",
         "Objetivo": "Cuantificar los ingresos reales efectivos descontando devoluciones e impuestos para alinear el criterio financiero y comercial.",
         "Fórmula": "Σ Venta_Neta",
         "Fuente": "ERP Facturación / CSV de pedidos (Venta_Neta)",
         "Frecuencia": "Mensual / Monitoreo continuo",
-        "Meta": "≥ 100 % del presupuesto comercial asignado al territorio",
-        "Umbral (Semáforo)": "🟢 ≥ 95 % de meta | 🟡 85 % – 94.9 % | 🔴 < 85 %",
-        "Interpretación": "Mide la tracción comercial real por provincia y canal; evita sobreestimar ingresos al excluir ventas brutas anuladas o con nota de crédito.",
-        "Responsable": "Finanzas / Dirección Comercial",
+        "Meta": "≥ 100 % del presupuesto comercial asignado",
+        "Umbral (Semáforo)": "🟢 ≥ 95 % | 🟡 85 % – 94.9 % | 🔴 < 85 %",
+        "Interpretación": "Mide la tracción comercial real por provincia y canal; evita sobreestimar ingresos al excluir ventas brutas anuladas.",
     },
     {
         "Nombre del Indicador": "2. Margen Bruto (%)",
+        "Área Principal": "Área Financiera",
         "Objetivo": "Monitorear la rentabilidad directa de las operaciones logísticas tras cubrir los costos directos de distribución.",
         "Fórmula": "(Σ Margen_Bruto ÷ Σ Venta_Neta) × 100",
-        "Fuente": "Contabilidad Analítica / CSV de pedidos (Margen_Bruto, Venta_Neta)",
+        "Fuente": "Contabilidad Analítica / CSV (Margen_Bruto, Venta_Neta)",
         "Frecuencia": "Mensual",
         "Meta": "≥ 25.0 % sobre ventas netas",
         "Umbral (Semáforo)": "🟢 ≥ 25.0 % | 🟡 18.0 % – 24.9 % | 🔴 < 18.0 %",
-        "Interpretación": "Permite detectar provincias o canales con alto volumen de ventas pero baja rentabilidad por sobrecostos de última milla o descuentos excesivos.",
-        "Responsable": "Gerencia Financiera",
+        "Interpretación": "Detecta provincias o canales con alto volumen de ventas pero baja rentabilidad por sobrecostos de última milla.",
     },
     {
         "Nombre del Indicador": "3. Cumplimiento de Meta Comercial (%)",
+        "Área Principal": "Gerencia General / Comercial",
         "Objetivo": "Evaluar el grado de alcance de los objetivos comerciales mensuales por provincia sin duplicar metas por pedido.",
         "Fórmula": "(Σ Venta_Neta ÷ Meta_Mensual_Provincia) × 100",
         "Fuente": "Presupuesto Comercial y Facturación (Venta_Neta, Meta_Venta)",
         "Frecuencia": "Mensual",
         "Meta": "≥ 100.0 %",
         "Umbral (Semáforo)": "🟢 ≥ 95.0 % | 🟡 85.0 % – 94.9 % | 🔴 < 85.0 %",
-        "Interpretación": "Compara el desempeño real frente a la cuota esperada del periodo; corrige la desconexión entre hojas de metas y cierres de facturación.",
-        "Responsable": "Dirección Comercial / Gerencia General",
+        "Interpretación": "Compara el desempeño real frente a la cuota esperada del periodo; corrige la desconexión entre hojas de metas y facturación.",
     },
     {
         "Nombre del Indicador": "4. Tasa de Reclamos por 1.000 Pedidos",
+        "Área Principal": "Atención al Cliente",
         "Objetivo": "Estandarizar la medición de incidencias de servicio al cliente relativizando por el volumen operativo de cada territorio.",
         "Fórmula": "(Σ Hubo_Reclamo ÷ Total_Pedidos) × 1.000",
-        "Fuente": "CRM Atención al Cliente / CSV de pedidos (Hubo_Reclamo)",
+        "Fuente": "CRM Atención al Cliente / CSV (Hubo_Reclamo)",
         "Frecuencia": "Semanal / Mensual",
         "Meta": "≤ 25.0 reclamos por cada 1.000 pedidos",
-        "Umbral (Semáforo)": "🟢 ≤ 25.0 | 🟡 25.1 – 50.0 | 🔴 > 50.0 por 1.000 pedidos",
-        "Interpretación": "Evita comparaciones injustas entre provincias de alto volumen (ej. Quito/Guayaquil) y plazas medianas (ej. Loja/Ambato) usando tasas en lugar de conteos absolutos.",
-        "Responsable": "Atención al Cliente",
+        "Umbral (Semáforo)": "🟢 ≤ 25.0 | 🟡 25.1 – 50.0 | 🔴 > 50.0",
+        "Interpretación": "Evita comparaciones injustas entre provincias de alto volumen (Quito/Guayaquil) y plazas medianas (Loja/Ambato).",
     },
     {
         "Nombre del Indicador": "5. Entrega a Tiempo – OTD (%)",
+        "Área Principal": "Gerencia de Operaciones",
         "Objetivo": "Medir la confiabilidad y puntualidad del servicio logístico frente a la promesa de entrega pactada con los comercios.",
         "Fórmula": "(Pedidos con Entrega_A_Tiempo = 1 ÷ Total_Pedidos) × 100",
-        "Fuente": "TMS Operaciones / CSV de pedidos (Entrega_A_Tiempo)",
+        "Fuente": "TMS Operaciones / CSV (Entrega_A_Tiempo)",
         "Frecuencia": "Diaria / Semanal / Mensual",
         "Meta": "≥ 90.0 % de pedidos entregados a tiempo",
         "Umbral (Semáforo)": "🟢 ≥ 90.0 % | 🟡 80.0 % – 89.9 % | 🔴 < 80.0 %",
-        "Interpretación": "Refleja la salud operativa de las rutas urbanas y regionales; debe analizarse junto con el P90 y el coeficiente de variación de tiempos de entrega.",
-        "Responsable": "Gerencia de Operaciones",
+        "Interpretación": "Refleja la salud operativa de las rutas urbanas y regionales; se complementa con el P90 y el coeficiente de variación.",
     },
 ])
 
 
 # ==========================================
-# 7. DESARROLLO DE LAS 4 VISTAS DEL DASHBOARD
+# 10. VISTAS DE LOS 4 NIVELES DE NAVEGACIÓN SUPERIOR
 # ==========================================
-def pagina_ejecutiva():
-    """NIVEL 1: Vista Ejecutiva (Gerencia General y Finanzas)."""
+def render_tarjetas_superiores():
+    """Muestra las 5 tarjetas KPI destacando con ⭐ las que pertenecen al Área seleccionada en la barra lateral."""
     t1, t2, t3, t4, t5 = st.columns(5)
-
     sem_cumpl = evaluar_umbral(K.get("cumplimiento"), 95.0, 85.0, menor_es_mejor=False)
     sem_margen = evaluar_umbral(K.get("margen_pct"), 25.0, 18.0, menor_es_mejor=False)
     sem_recl = evaluar_umbral(K.get("reclamos"), 25.0, 50.0, menor_es_mejor=True)
     sem_otd = evaluar_umbral(K.get("otd"), 90.0, 80.0, menor_es_mejor=False)
 
     tarjeta_kpi(
-        t1, "1. Ventas netas", K.get("venta"), "${:,.0f}",
-        ayuda="Ingresos netos efectivos (Σ Venta_Neta). Criterio unificado con Finanzas.",
+        t1, "venta", "Ventas netas", K.get("venta"), "${:,.0f}",
+        ayuda="Ingresos netos efectivos (Σ Venta_Neta).",
         sem=sem_cumpl if K.get("cumplimiento") is not None else None,
     )
     tarjeta_kpi(
-        t2, "2. Margen bruto", K.get("margen_pct"), "{:.1f}%", K0.get("margen_pct"), unidad=" pp",
-        ayuda=f"Σ Margen_Bruto ÷ Σ Venta_Neta. Utilidad bruta acumulada: ${K.get('margen_monto', 0):,.0f}",
+        t2, "margen_pct", "Margen bruto", K.get("margen_pct"), "{:.1f}%", K0.get("margen_pct"), unidad=" pp",
+        ayuda=f"Σ Margen_Bruto ÷ Σ Venta_Neta. Monto: ${K.get('margen_monto', 0):,.0f}",
         sem=sem_margen,
     )
     tarjeta_kpi(
-        t3, "3. Cumplimiento meta", K.get("cumplimiento"), "{:.1f}%", K0.get("cumplimiento"), unidad=" pp",
+        t3, "cumplimiento", "Cumplimiento meta", K.get("cumplimiento"), "{:.1f}%", K0.get("cumplimiento"), unidad=" pp",
         ayuda="Ventas netas ÷ Meta comercial única por provincia y mes.",
         sem=sem_cumpl,
     )
     tarjeta_kpi(
-        t4, "4. Reclamos / 1.000", K.get("reclamos"), "{:.1f}", K0.get("reclamos"), inverso=True,
-        ayuda="Pedidos con reclamo por cada 1.000 pedidos (tasa estandarizada).",
+        t4, "reclamos", "Reclamos / 1.000", K.get("reclamos"), "{:.1f}", K0.get("reclamos"), inverso=True,
+        ayuda="Pedidos con reclamo por cada 1.000 pedidos.",
         sem=sem_recl,
     )
     tarjeta_kpi(
-        t5, "5. Entrega a tiempo (OTD)", K.get("otd"), "{:.1f}%", K0.get("otd"), unidad=" pp",
+        t5, "otd", "Entrega a tiempo (OTD)", K.get("otd"), "{:.1f}%", K0.get("otd"), unidad=" pp",
         ayuda="Porcentaje de pedidos entregados dentro del SLA prometido.",
         sem=sem_otd,
     )
 
+
+def pagina_ejecutiva():
+    render_tarjetas_superiores()
+
+    # Lectura dinámica adaptada al Área seleccionada en la barra lateral
     if "Provincia" in d and d["Provincia"].nunique() > 1:
         r = resumen_por(d, "Provincia")
         msgs = []
         if "Venta_Neta" in r and r["Venta_Neta"].sum() > 0:
             t = r.loc[r["Venta_Neta"].idxmax()]
-            msgs.append(f"💰 **Concentración comercial:** **{t['Provincia']}** aporta el {t['Venta_Neta'] / r['Venta_Neta'].sum():.0%} de las ventas netas.")
+            msgs.append(f"💰 **Líder en Ventas Netas:** **{t['Provincia']}** ({t['Venta_Neta'] / r['Venta_Neta'].sum():.0%} del total).")
+        if "Margen_%" in r and r["Margen_%"].notna().any():
+            t = r.loc[r["Margen_%"].idxmin()]
+            msgs.append(f"📉 **Menor Margen Bruto:** **{t['Provincia']}** ({t['Margen_%']:.1f}%).")
         if "Cumplimiento_%" in r and r["Cumplimiento_%"].notna().any():
             t = r.loc[r["Cumplimiento_%"].idxmin()]
-            msgs.append(f"🎯 **Brecha de meta:** **{t['Provincia']}** registra el menor cumplimiento ({t['Cumplimiento_%']:.1f}%).")
+            msgs.append(f"🎯 **Brecha de Meta:** **{t['Provincia']}** ({t['Cumplimiento_%']:.1f}%).")
         if "Reclamos_x1000" in r and r["Reclamos_x1000"].notna().any():
             t = r.loc[r["Reclamos_x1000"].idxmax()]
-            msgs.append(f"📣 **Foco de atención al cliente:** **{t['Provincia']}** presenta la mayor tasa relativa ({t['Reclamos_x1000']:.1f} reclamos / 1.000 pedidos).")
+            msgs.append(f"📣 **Mayor Tasa de Reclamos:** **{t['Provincia']}** ({t['Reclamos_x1000']:.1f} / 1.000 pedidos).")
         if "OTD_%" in r and r["OTD_%"].notna().any():
             t = r.loc[r["OTD_%"].idxmin()]
-            msgs.append(f"⏱️ **Alerta logística:** **{t['Provincia']}** tiene el menor OTD ({t['OTD_%']:.1f}%).")
+            msgs.append(f"⏱️ **Menor OTD:** **{t['Provincia']}** ({t['OTD_%']:.1f}%).")
         if msgs:
-            st.info(" · ".join(msgs))
+            st.info(f"**Lectura ejecutiva ({area_activa}):** " + " · ".join(msgs))
             st.caption(
-                "⚠️ **Límite interpretativo (Gobernanza):** Estas lecturas describen asociaciones observadas en los registros internos de LogiAndes S.A. "
-                "Variaciones coincidentes con indicadores del BCE o INEC no demuestran causalidad directa sin un diseño econométrico o experimental adicional."
+                "⚠️ **Criterio de interpretación:** Estas asociaciones describen el comportamiento interno del dataset; "
+                "no establecen causalidad directa frente a variables macroeconómicas externas (BCE / INEC)."
             )
 
     c1, c2 = st.columns([1, 1.3])
     with c1:
         with st.container(border=True):
-            st.subheader("Ventas netas por provincia")
-            if necesita(d, ["Provincia", "Venta_Neta"]):
-                r = resumen_por(d, "Provincia").sort_values("Venta_Neta")
+            if area_activa == "💰 Área Financiera" and "Margen_Bruto" in d.columns:
+                st.subheader("Margen bruto (%) por provincia (Foco Finanzas)")
+                r = resumen_por(d, "Provincia").sort_values("Margen_%")
                 fig = px.bar(
-                    r, x="Venta_Neta", y="Provincia", orientation="h",
-                    color="Venta_Neta", color_continuous_scale="Blues", text_auto=".3s",
+                    r, x="Margen_%", y="Provincia", orientation="h",
+                    color="Margen_%", color_continuous_scale="Purples", text_auto=".1f",
                 )
-                fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="Ventas netas (US$)")
-                mostrar(fig, "p1_ventas_prov")
+                fig.add_vline(x=25, line_dash="dash", annotation_text="Meta 25%")
+                fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="Margen Bruto (%)")
+                mostrar(fig, "p1_margen_prov")
+            else:
+                st.subheader("Ventas netas por provincia")
+                if necesita(d, ["Provincia", "Venta_Neta"]):
+                    r = resumen_por(d, "Provincia").sort_values("Venta_Neta")
+                    fig = px.bar(
+                        r, x="Venta_Neta", y="Provincia", orientation="h",
+                        color="Venta_Neta", color_continuous_scale="Blues", text_auto=".3s",
+                    )
+                    fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="Ventas netas (US$)")
+                    mostrar(fig, "p1_ventas_prov")
+
     with c2:
         with st.container(border=True):
             st.subheader("Evolución mensual de ventas netas vs. Meta comercial")
@@ -925,7 +1131,7 @@ def pagina_ejecutiva():
     c3, c4 = st.columns(2)
     with c3:
         with st.container(border=True):
-            st.subheader("Tasa de reclamos por 1.000 pedidos (Umbral ≤ 25)")
+            st.subheader("Tasa de reclamos por 1.000 pedidos (Meta ≤ 25)")
             if necesita(d, ["Provincia", "Hubo_Reclamo"]):
                 r = resumen_por(d, "Provincia").sort_values("Reclamos_x1000")
                 fig = px.bar(
@@ -967,11 +1173,9 @@ def pagina_ejecutiva():
 
 
 def pagina_territorial():
-    """NIVEL 2: Diagnóstico Territorial (Dirección Comercial y Atención al Cliente)."""
     if not necesita(d, ["Provincia", "Canal"]):
         return
 
-    # Filtro progresivo propio del Nivel 2 (Ciudad) según diseño de Camila Andrade
     d_terr = d.copy()
     with st.container(border=True):
         ct1, ct2, ct3 = st.columns([1.5, 2.0, 1.1])
@@ -982,11 +1186,11 @@ def pagina_territorial():
                     "🏙️ Filtro de Nivel 2 · Ciudad / Cantón",
                     ciudades_disp,
                     key="f_ciudad",
-                    placeholder="Todas las ciudades del territorio",
+                    placeholder="Todas las ciudades",
                 )
                 d_terr = aplicar(d_terr, "Ciudad", sel_ciudad)
             else:
-                st.caption("🏙️ Sin desglose por ciudad en este archivo.")
+                st.caption("🏙️ Sin columna Ciudad en el dataset.")
 
         opciones_vista = [
             "🎛️ Vista integrada",
@@ -1000,21 +1204,21 @@ def pagina_territorial():
         with ct2:
             if hasattr(st, "segmented_control"):
                 vista_terr = st.segmented_control(
-                    "Visualización territorial",
+                    "Modo de análisis territorial",
                     opciones_vista,
                     default=opciones_vista[0],
                     key="seg_terr",
                 ) or opciones_vista[0]
             else:
-                vista_terr = st.selectbox("Visualización territorial", opciones_vista, key="rad_terr")
+                vista_terr = st.selectbox("Modo de análisis territorial", opciones_vista, key="rad_terr")
         with ct3:
-            metrica = st.radio("Métrica de volumen", opciones_metrica, horizontal=True, key="met_terr")
+            metrica = st.radio("Métrica", opciones_metrica, horizontal=True, key="met_terr")
 
     if d_terr.empty:
         st.warning("No hay pedidos para la ciudad seleccionada.")
         return
 
-    def render_sunburst(alto=400):
+    def render_sunburst(alto=390):
         with st.container(border=True):
             st.subheader("🌞 Participación por Provincia y Canal")
             if metrica == "Ventas netas":
@@ -1024,7 +1228,7 @@ def pagina_territorial():
             fig.update_traces(textinfo="label+percent parent")
             mostrar(fig, "p2_sunburst", alto=alto)
 
-    def render_calor(alto=400):
+    def render_calor(alto=390):
         with st.container(border=True):
             st.subheader("🔥 Matriz de Intensidad: Provincia × Canal")
             if metrica == "Ventas netas":
@@ -1035,9 +1239,9 @@ def pagina_territorial():
             fig.update_layout(xaxis_title=None, yaxis_title=None)
             mostrar(fig, "p2_calor", alto=alto)
 
-    def render_scatter(alto=400):
+    def render_scatter(alto=390):
         with st.container(border=True):
-            st.subheader("🎯 Relación Volumen de Pedidos vs. Tasa de Reclamos (Continuidad Clase 1)")
+            st.subheader("🎯 Relación Volumen de Pedidos vs. Tasa de Reclamos")
             if necesita(d_terr, ["Hubo_Reclamo"]):
                 r = resumen_por(d_terr, "Provincia")
                 tamano = r["Venta_Neta"].fillna(0).clip(lower=0) if "Venta_Neta" in r else None
@@ -1049,14 +1253,11 @@ def pagina_territorial():
                 fig.update_traces(textposition="top center")
                 fig.update_layout(xaxis_title="Volumen de Pedidos", yaxis_title="Reclamos por 1.000 pedidos")
                 mostrar(fig, "p2_scatter", alto=alto)
-                st.caption(
-                    "Prevención de sesgo visual: El eje Y mide la tasa por cada 1.000 pedidos (no el conteo bruto), "
-                    "permitiendo comparar justamente territorios con distinto volumen de operación."
-                )
+                st.caption("Tamaño = Ventas netas · Color = OTD (%). Compara tasas relativas para evitar sesgo por tamaño.")
 
     def render_tabla():
         with st.container(border=True):
-            st.subheader("📋 Desempeño Integral Comparativo por Territorio")
+            st.subheader("📋 Resumen Comparativo por Provincia")
             r = resumen_por(d_terr, "Provincia")
             if "Venta_Neta" in r:
                 r = r.sort_values("Venta_Neta", ascending=False)
@@ -1077,28 +1278,26 @@ def pagina_territorial():
     if vista_terr == "🎛️ Vista integrada":
         g1, g2 = st.columns(2)
         with g1:
-            render_sunburst(alto=370)
+            render_sunburst(alto=360)
         with g2:
-            render_calor(alto=370)
-        render_scatter(alto=380)
+            render_calor(alto=360)
+        render_scatter(alto=370)
         render_tabla()
     elif vista_terr == "🌞 Composición (Sunburst)":
-        render_sunburst(alto=480)
+        render_sunburst(alto=470)
     elif vista_terr == "🔥 Mapa de calor":
-        render_calor(alto=450)
+        render_calor(alto=440)
     elif vista_terr == "🎯 Pedidos vs. reclamos":
-        render_scatter(alto=460)
+        render_scatter(alto=450)
     else:
         render_tabla()
 
 
 def pagina_operativa():
-    """NIVEL 3: Detalle Operativo (Gerencia de Operaciones y Consulta Granular Gobernada)."""
     d_op = d.copy()
 
-    # Filtro progresivo propio del Nivel 3 (Línea de Servicio) + Control de Rol de Gobernanza
     with st.container(border=True):
-        co1, co2, co3 = st.columns([1.8, 1.4, 1.4], vertical_alignment="bottom")
+        co1, co2 = st.columns([2.2, 1.6])
         with co1:
             if "Linea_Servicio" in d_op.columns:
                 lineas_disp = sorted(d_op["Linea_Servicio"].dropna().unique())
@@ -1106,21 +1305,15 @@ def pagina_operativa():
                     "📦 Filtro de Nivel 3 · Línea de servicio logístico",
                     lineas_disp,
                     key="f_linea",
-                    placeholder="Todas las líneas (Urbana, Regional, Express…)",
+                    placeholder="Todas las líneas de servicio",
                 )
                 d_op = aplicar(d_op, "Linea_Servicio", sel_linea)
             else:
-                st.caption("📦 Sin columna de Línea de Servicio en el archivo.")
+                st.caption("📦 Sin columna Línea de Servicio en este archivo.")
         with co2:
             filtro_incidencia = st.selectbox(
-                "🔎 Filtro operativo de pedidos",
+                "🔎 Filtro rápido de incidencias operativas",
                 ["Todos los pedidos", "Solo con reclamo", "Solo entregas tardías (OTD = 0)"],
-            )
-        with co3:
-            rol_autorizado = st.toggle(
-                "🔓 Vista auditor autorizado (Mostrar vendedor/cliente)",
-                value=False,
-                help="Simula el criterio de gobernanza de Camila: por defecto se anonimizan datos de vendedores y clientes.",
             )
 
     if d_op.empty:
@@ -1130,7 +1323,7 @@ def pagina_operativa():
     c1, c2 = st.columns(2)
     with c1:
         with st.container(border=True):
-            st.subheader("Distribución y dispersión del tiempo de entrega (Boxplot)")
+            st.subheader("Distribución del tiempo de entrega (Boxplot)")
             if necesita(d_op, ["Provincia", "Tiempo_Entrega"]):
                 fig = px.box(
                     d_op.dropna(subset=["Tiempo_Entrega"]),
@@ -1138,10 +1331,9 @@ def pagina_operativa():
                 )
                 fig.update_layout(showlegend=False, xaxis_title=None, yaxis_title="Tiempo de entrega")
                 mostrar(fig, "p3_box")
-                st.caption("Supera la limitación de mirar solo promedios: expone mediana, rango intercuartílico y valores atípicos.")
     with c2:
         with st.container(border=True):
-            st.subheader("Entrega a tiempo (OTD %) por canal y servicio")
+            st.subheader("Entrega a tiempo (OTD %) por canal")
             if necesita(d_op, ["Canal", "Entrega_A_Tiempo"]):
                 r = resumen_por(d_op, "Canal").sort_values("OTD_%")
                 fig = px.bar(
@@ -1154,7 +1346,7 @@ def pagina_operativa():
 
     if "Provincia" in d_op and "Tiempo_Entrega" in d_op:
         with st.container(border=True):
-            st.subheader("Estadísticos de variabilidad logística por provincia")
+            st.subheader("Variabilidad logística por provincia (Media, Mediana, P90 y Coef. Variación)")
             var = (
                 d_op.groupby("Provincia")["Tiempo_Entrega"]
                 .agg(Media="mean", Mediana="median", P90=lambda s: s.quantile(0.9), Desv_Est="std")
@@ -1162,14 +1354,9 @@ def pagina_operativa():
             )
             var["Coef_Var_%"] = (var["Desv_Est"] / var["Media"].replace(0, np.nan)) * 100
             st.dataframe(var.round(2).sort_values("Coef_Var_%", ascending=False), hide_index=True, **AN_DF)
-            st.caption(
-                "El Coeficiente de Variación (Desv_Est ÷ Media) identifica qué territorios sufren mayor inestabilidad en entregas. "
-                "P90 indica el tiempo máximo dentro del cual se completa el 90 % de los pedidos."
-            )
 
-    # Explorador de pedidos con gobernanza de datos sensibles
     with st.container(border=True):
-        st.subheader("🔎 Explorador trazable de pedidos individuales")
+        st.subheader("🔎 Explorador de pedidos individuales (Integrado con Lamp Login Gobernanza)")
         sensibles = [c for c in d_op.columns if any(s in _limpiar(c) for s in SENSIBLES)]
         vista = d_op.copy()
         if filtro_incidencia == "Solo con reclamo" and "Hubo_Reclamo" in vista.columns:
@@ -1177,19 +1364,18 @@ def pagina_operativa():
         elif filtro_incidencia.startswith("Solo entregas tardías") and "Entrega_A_Tiempo" in vista.columns:
             vista = vista[vista["Entrega_A_Tiempo"] == 0]
 
-        if not rol_autorizado and sensibles:
+        if not st.session_state["authenticated"] and sensibles:
             vista = vista.drop(columns=sensibles)
             st.caption(
-                f"🔒 **Gobernanza activa (Vista estándar):** Se han ocultado las columnas `{', '.join(sensibles)}` "
-                "para proteger datos personales y evitar rankings punitivos sin contexto."
+                f"🔒 **Gobernanza activa:** Las columnas sensibles (`{', '.join(sensibles)}`) están ocultas. "
+                "Para desbloquearlas, usa el módulo **💡 Lamp Login · Gobernanza** en la barra lateral izquierda."
             )
-        elif rol_autorizado and sensibles:
-            st.warning(
-                f"🔓 **Modo Auditor Autorizado activo:** Visualizando columnas sensibles (`{', '.join(sensibles)}`). "
-                "Uso exclusivo para auditoría operativa interna."
+        elif st.session_state["authenticated"] and sensibles:
+            st.success(
+                f"🔓 **Modo Auditor Autorizado ({st.session_state['email']}):** Visualizando columnas protegidas (`{', '.join(sensibles)}`)."
             )
 
-        st.dataframe(vista, height=360, **AN_DF)
+        st.dataframe(vista, height=350, **AN_DF)
         st.download_button(
             "📥 Descargar vista actual (CSV)",
             data=vista.to_csv(index=False).encode("utf-8-sig"),
@@ -1199,73 +1385,42 @@ def pagina_operativa():
 
 
 def pagina_ficha_y_gobernanza():
-    """MÓDULO DOCUMENTAL: Cumple todos los requisitos conceptuales y metodológicos de la Prueba Práctica 2."""
-    # 1. Descripción del problema y matriz de audiencias
     with st.container(border=True):
-        st.subheader("1. Diagnóstico del Problema Empresarial y Necesidades por Audiencia")
+        st.subheader("1. Problema Empresarial y Necesidades de las 5 Áreas (Navegables en el Panel Izquierdo)")
         st.markdown(
             """
-            **Problema empresarial en LogiAndes S.A.:** La empresa opera en **Quito, Guayaquil, Cuenca, Manta, Ambato y Loja** atendiendo a comercios medianos, pero su rápido crecimiento dejó la información fragmentada en hojas de cálculo aisladas y criterios semánticos contradictorios (Comercial reportaba *ventas brutas*, Finanzas *ventas netas*, Operaciones solo miraba *tiempos promedio* sin dispersión, Atención al Cliente contaba *reclamos absolutos* sin relativizar por volumen, y las *metas comerciales* estaban desconectadas de los periodos de facturación).
+            LogiAndes S.A. opera en **Quito, Guayaquil, Cuenca, Manta, Ambato y Loja**. Antes de esta solución BI, cada área manejaba cifras aisladas: Comercial reportaba *ventas brutas*, Finanzas *ventas netas*, Operaciones miraba *tiempos promedio* ocultando la variabilidad, Atención al Cliente contaba *reclamos absolutos* sin relativizar por volumen, y las *metas* no coincidían con los periodos de facturación.
             """
         )
-        audiencias_df = pd.DataFrame([
-            {
-                "Audiencia": "1. Gerencia General",
-                "Necesidad de Información": "Monitorear si la empresa cumple sus objetivos estratégicos nacionales y territoriales.",
-                "Respuesta en el Dashboard": "Vista Ejecutiva (Nivel 1) con 5 tarjetas KPI semaforizadas, cumplimiento de meta mensual y serie temporal.",
-            },
-            {
-                "Audiencia": "2. Dirección Comercial",
-                "Necesidad de Información": "Analizar el desempeño comercial filtrando por provincia, ciudad, línea de servicio y periodo.",
-                "Respuesta en el Dashboard": "Filtros jerárquicos en 3 niveles, Sunburst y Mapa de calor Provincia × Canal, y seguimiento de metas.",
-            },
-            {
-                "Audiencia": "3. Gerencia de Operaciones",
-                "Necesidad de Información": "Identificar territorios y canales con retrasos o alta variabilidad en los tiempos de entrega.",
-                "Respuesta en el Dashboard": "Detalle Operativo (Nivel 3) con Boxplots de tiempos, OTD (%), P90 y Coeficiente de Variación provincial.",
-            },
-            {
-                "Audiencia": "4. Área Financiera",
-                "Necesidad de Información": "Unificar el criterio de ingresos en Ventas Netas e incorporar el Margen Bruto real.",
-                "Respuesta en el Dashboard": "Cálculo estandarizado de Ventas Netas (US$) y Margen Bruto (% y monto) en tarjetas y tablas comparativas.",
-            },
-            {
-                "Audiencia": "5. Atención al Cliente",
-                "Necesidad de Información": "Evaluar reclamos mediante tasas relativas para evitar comparaciones injustas entre provincias de distinto tamaño.",
-                "Respuesta en el Dashboard": "KPI de Tasa de Reclamos por 1.000 pedidos y gráfico de dispersión Volumen de Pedidos vs. Tasa de Reclamos.",
-            },
+        resumen_areas = pd.DataFrame([
+            {"Área (Pestaña Lateral)": k, "Rol / Audiencia": v["rol"], "Necesidad y Solución BI": v["objetivo"]}
+            for k, v in AREAS_EMPRESA.items()
+            if k != "🌐 Todas las áreas · Vista Integral"
         ])
-        st.dataframe(audiencias_df, hide_index=True, **AN_DF)
-        st.caption(
-            "**Estrategia de herramientas (Tensión 2 del caso):** Se utiliza **Streamlit** para este prototipo funcional ágil en Python; "
-            "**Gradio** se reserva para consultas acotadas de resumen puntual; y **Power BI / Tableau** para la futura distribución corporativa con seguridad a nivel de fila (RLS)."
-        )
+        st.dataframe(resumen_areas, hide_index=True, **AN_DF)
 
-    # 2. Ficha técnica completa de los 5 KPIs
     with st.container(border=True):
-        st.subheader("2. Ficha Técnica Oficial de los 5 KPIs (Modelo Semántico Unificado)")
+        st.subheader("2. Ficha Técnica Oficial de los 5 KPIs")
         st.dataframe(FICHA_TECNICA_KPIS, hide_index=True, **AN_DF)
 
-    # 3. Reflexión sobre los 4 pilares exigidos en la Prueba Práctica 2
     with st.container(border=True):
-        st.subheader("3. Marco de Gobernanza, Ética y Límites Interpretativos")
+        st.subheader("3. Reflexión sobre Interactividad, Sesgos, Privacidad y Límites Interpretativos")
         r1, r2 = st.columns(2)
         with r1:
             st.markdown(
                 """
-                * **🎛️ Prevención de sobreinteractividad:** Colocar 10 filtros simultáneos (provincia, ciudad, canal, cliente, vendedor, estado, tipo de reclamo, etc.) fragmenta la muestra y produce fatiga cognitiva. Por ello, este dashboard aplica **revelación progresiva en 3 niveles**: filtros estratégicos arriba (Periodo, Provincia, Canal), filtro táctico de **Ciudad** en el Nivel 2 (Territorial) y filtro operativo de **Línea de Servicio** e incidencias en el Nivel 3 (Operativo).
-                * **👁️ Mitigación de sesgos visuales:** Reportar conteos absolutos de reclamos sesga la atención hacia Quito y Guayaquil solo por su tamaño. El dashboard corrige este sesgo utilizando **tasas por cada 1.000 pedidos**, **Boxplots** (para no ocultar la dispersión detrás del promedio) y líneas de referencia explícitas en metas (100 % comercial, 90 % OTD y ≤ 25 reclamos/1.000).
+                * **🎛️ Riesgos de sobreinteractividad:** Se evitó saturar la pantalla con múltiples filtros simultáneos organizando la exploración en **pestañas laterales por área** y **3 niveles jerárquicos superiores** (filtros globales de Periodo/Provincia/Canal arriba; Ciudad en el Nivel 2; Línea de servicio en el Nivel 3).
+                * **👁️ Sesgos visuales:** Se reemplazaron los conteos brutos de reclamos por la **tasa por cada 1.000 pedidos** y los promedios simples de entrega por **Boxplots, P90 y Coeficiente de Variación**.
                 """
             )
         with r2:
             st.markdown(
                 """
-                * **🔒 Privacidad y gobernanza de datos:** En cumplimiento del principio de mínimo privilegio, las vistas Ejecutiva y Territorial presentan datos agregados por provincia y canal. En el Nivel Operativo, los identificadores de **vendedores, clientes o contactos** se enmascaran automáticamente por defecto y solo pueden habilitarse mediante el conmutador de *Auditor Autorizado*, evitando rankings punitivos sin contexto.
-                * **📉 Límites interpretativos y fuentes externas (BCE / INEC):** Aunque se contraste la serie mensual de ventas con indicadores macroeconómicos del **Banco Central del Ecuador (BCE)** o del **INEC**, una caída simultánea muestra **asociación temporal, no causalidad**. Atribuir variaciones internas al entorno macro requiere aislar factores logísticos internos (como quiebres de ruta o caídas de OTD).
+                * **🔒 Privacidad y gobernanza (`LampLoginAnimation`):** Los identificadores de vendedores y clientes permanecen ocultos por defecto y solo se habilitan cuando un auditor inicia sesión en el panel lateral **💡 Lamp Login · Gobernanza**.
+                * **📉 Límites interpretativos (BCE / INEC):** Las caídas o picos en la serie temporal muestran asociaciones internas; cruzar estos datos con indicadores macroeconómicos del **BCE** o **INEC** aporta contexto, pero no prueba causalidad sin un análisis adicional.
                 """
             )
 
-    # 4. Configuración técnica de columnas y calidad del dataset
     with st.expander("🧩 Configuración técnica de mapeo de columnas y auditoría de calidad del CSV"):
         opciones_col = ["(ninguna)"] + list(df_raw.columns)
         grid = st.columns(3)
@@ -1301,11 +1456,10 @@ def pagina_ficha_y_gobernanza():
             "Cardinalidad (únicos)": [int(base[c].nunique(dropna=True)) for c in cols_ok],
         })
         st.dataframe(calidad, hide_index=True, **AN_DF)
-        st.caption(f"Total registros cargados: **{len(base):,}** · Duplicados exactos: **{int(base.duplicated().sum()):,}**")
 
 
 # ==========================================
-# 8. BARRA DE NAVEGACIÓN PRINCIPAL FLUIDA
+# 11. NAVEGACIÓN SUPERIOR FLUIDA (4 SECCIONES)
 # ==========================================
 tab_ej, tab_te, tab_op, tab_bi = st.tabs([
     "🏛️  \n1. Visión Ejecutiva",
@@ -1325,6 +1479,6 @@ with tab_bi:
 
 st.divider()
 st.caption(
-    "LogiAndes S.A. © 2026 · Solución de Business Intelligence en Streamlit · "
-    "Visualización, Storytelling y Business Intelligence (Prueba Práctica 2)."
+    f"LogiAndes S.A. © 2026 · Vista activa: {area_activa} · "
+    "Prototipo BI en Streamlit con LampLoginAnimation UI & Navegación Lateral por Áreas."
 )
