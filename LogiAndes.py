@@ -27,7 +27,7 @@ st.set_page_config(
     page_title="LogiAndes S.A. · BI Dashboard",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Colores que se leen bien tanto en tema claro como oscuro.
@@ -35,7 +35,8 @@ st.markdown(
     """
 <style>
     .main-title { font-size: 2.1rem; font-weight: 700; color: #3B82F6; margin-bottom: .2rem; }
-    .sub-title  { font-size: 1rem; opacity: .75; margin-bottom: 1.2rem; }
+    .sub-title  { font-size: 1rem; opacity: .75; margin-bottom: .8rem; }
+    .block-container { padding-top: 2rem; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -155,6 +156,84 @@ def a_fecha(s: pd.Series) -> pd.Series:
     return pd.to_datetime(t, errors="coerce", dayfirst=dayfirst)
 
 
+
+# Pistas para reconocer columnas por su nombre y por el tipo de contenido.
+# "si": palabras clave con su peso · "no": palabras que descartan · "tipo": contenido esperado.
+PISTAS = {
+    "Fecha": {"si": {"fecha": 3, "date": 3, "pedido": 1, "factura": 1}, "no": [], "tipo": "fecha"},
+    "Provincia": {"si": {"provincia": 3, "province": 3, "prov": 1}, "no": ["meta", "id"], "tipo": "texto"},
+    "Ciudad": {"si": {"ciudad": 3, "city": 3, "canton": 3}, "no": ["id"], "tipo": "texto"},
+    "Canal": {"si": {"canal": 3, "channel": 3, "medio": 1}, "no": ["id"], "tipo": "texto"},
+    "Linea_Servicio": {"si": {"servicio": 3, "linea": 3, "service": 2, "producto": 1}, "no": ["id"], "tipo": "texto"},
+    "Venta_Neta": {"si": {"neta": 4, "neto": 4, "net": 3, "venta": 2, "ventas": 2, "ingreso": 2,
+                          "monto": 1, "factur": 1, "total": 1},
+                   "no": ["bruta", "bruto", "meta", "margen", "costo", "descuento", "reclamo",
+                          "tiempo", "id", "impuesto"], "tipo": "numero+"},
+    "Margen_Bruto": {"si": {"margen": 4, "utilidad": 3, "ganancia": 3, "profit": 3, "bruto": 1, "bruta": 1},
+                     "no": ["meta", "id"], "tipo": "numero+"},
+    "Hubo_Reclamo": {"si": {"reclam": 4, "queja": 3, "claim": 3},
+                     "no": ["tipo", "motivo", "tiempo", "costo", "monto", "id"], "tipo": "binario"},
+    "Entrega_A_Tiempo": {"si": {"a_tiempo": 4, "puntual": 4, "otd": 4, "on_time": 4, "ontime": 4, "sla": 3,
+                                "cumpl": 2, "retras": 2, "atras": 2, "estado": 1, "tiempo": 1, "entrega": 1},
+                         "no": ["id", "reclam"], "tipo": "binario"},
+    "Tiempo_Entrega": {"si": {"tiempo_entrega": 4, "tiempo_de_entrega": 4, "lead_time": 4, "dias_entrega": 4,
+                              "horas_entrega": 4, "demora": 3, "transporte": 2, "tiempo": 2, "dias": 2,
+                              "horas": 2, "duracion": 2},
+                       "no": ["a_tiempo", "meta", "id", "reclam"], "tipo": "numero+"},
+    "Meta_Venta": {"si": {"meta": 4, "target": 4, "objetivo": 3, "presupuesto": 3}, "no": ["id", "cumpl"],
+                   "tipo": "numero"},
+}
+
+
+def _tipo_ok(s: pd.Series, tipo: str) -> bool:
+    s = s.dropna()
+    if s.empty:
+        return False
+    if len(s) > 2000:
+        s = s.sample(2000, random_state=0)
+    n = s.nunique()
+    if tipo == "binario":
+        return n <= 3
+    if tipo == "fecha":
+        return (not pd.api.types.is_numeric_dtype(s)) and a_fecha(s).notna().mean() >= 0.8
+    num = a_numero(s).notna().mean() >= 0.8
+    if tipo == "numero":
+        return num
+    if tipo == "numero+":
+        return num and n > 3
+    return (not num) and n <= 500  # texto
+
+
+@st.cache_data(show_spinner=False)
+def sugerir_mapeo(_df: pd.DataFrame, huella: str) -> dict:
+    """Propone qué columna del CSV corresponde a cada campo, mirando nombre y contenido."""
+    candidatos = []
+    for campo in CAMPOS:
+        if campo in _df.columns:
+            continue
+        regla = PISTAS[campo]
+        for col in _df.columns:
+            if col in CAMPOS:
+                continue
+            nombre = _limpiar(col)
+            partes = set(nombre.split("_"))
+
+            def hit(t, nombre=nombre, partes=partes):
+                return (t in partes) if len(t) <= 3 else (t in nombre)
+
+            if any(hit(t) for t in regla["no"]):
+                continue
+            puntos = sum(p for t, p in regla["si"].items() if hit(t))
+            if puntos > 0 and _tipo_ok(_df[col], regla["tipo"]):
+                candidatos.append((puntos, campo, col))
+    sug, usadas = {}, set()
+    for puntos, campo, col in sorted(candidatos, reverse=True):
+        if campo not in sug and col not in usadas:
+            sug[campo] = col
+            usadas.add(col)
+    return sug
+
+
 @st.cache_data(show_spinner=False)
 def preparar_datos(_df: pd.DataFrame, huella: str, mapeo: tuple, margen_es_pct: bool) -> pd.DataFrame:
     """Aplica el mapeo manual, convierte tipos y crea AñoMes. `huella` identifica el archivo en la caché."""
@@ -179,23 +258,17 @@ def preparar_datos(_df: pd.DataFrame, huella: str, mapeo: tuple, margen_es_pct: 
 
 
 # ==========================================
-# 3. BARRA LATERAL: ORIGEN DE DATOS, NAVEGACIÓN Y FILTROS
+# 3. ORIGEN DE DATOS (barra lateral, opcional)
 # ==========================================
 CARPETA_DEFECTO = Path(__file__).resolve().parent
 
 st.sidebar.title("🚚 LogiAndes S.A.")
 st.sidebar.caption("Módulo de Inteligencia de Negocios")
 
-# Contenedores creados en orden visual; se rellenan en el orden que necesita el código.
-caja_nav = st.sidebar.container()
-caja_filtros = st.sidebar.container()
-exp_datos = st.sidebar.expander("⚙️ Datos y definiciones")
-
-# --- 3.1 Origen de datos ---
 contenido, nombre_archivo = None, ""
-with exp_datos:
+with st.sidebar.expander("⚙️ Origen de datos", expanded=True):
     carpeta = Path(st.text_input("Carpeta de datos", value=str(CARPETA_DEFECTO))).expanduser()
-    subido = st.file_uploader("…o sube un CSV", type=["csv"])
+    subido = st.file_uploader("…o sube un CSV", type=["csv"], key="up_side")
     if subido is not None:
         contenido, nombre_archivo = subido.getvalue(), subido.name
     else:
@@ -204,13 +277,14 @@ with exp_datos:
             nombre_archivo = st.selectbox("Archivo", archivos)
             contenido = (carpeta / nombre_archivo).read_bytes()
 
+st.markdown("<div class='main-title'>LogiAndes S.A. · Panel de desempeño</div>", unsafe_allow_html=True)
+
 if contenido is None:
-    st.markdown("<div class='main-title'>LogiAndes S.A.</div>", unsafe_allow_html=True)
-    st.warning(
-        f"No encontré archivos CSV en `{carpeta}`.\n\n"
-        "Copia tu CSV a esa carpeta, cambia la ruta o súbelo desde **⚙️ Datos y definiciones** (barra lateral)."
-    )
-    st.stop()
+    st.warning(f"No encontré archivos CSV en `{carpeta}`. Sube uno aquí para empezar:")
+    subido_main = st.file_uploader("Sube tu CSV", type=["csv"], key="up_main")
+    if subido_main is None:
+        st.stop()
+    contenido, nombre_archivo = subido_main.getvalue(), subido_main.name
 
 try:
     df_raw = cargar_csv(contenido)
@@ -223,25 +297,30 @@ if df_raw.empty:
     st.stop()
 
 huella = hashlib.md5(contenido).hexdigest()
+sug = sugerir_mapeo(df_raw, huella)
+faltan_ini = [c for c in CAMPOS_CORE if c not in df_raw.columns and c not in sug]
 
-# --- 3.2 Mapeo de columnas y definiciones ---
-with exp_datos:
-    st.caption(f"📄 {nombre_archivo} · {len(df_raw):,} filas · {df_raw.shape[1]} columnas")
-
-    mapeo = {}
-    faltan = [c for c in CAMPOS if c not in df_raw.columns]
-    if faltan:
-        st.markdown("**Columnas no reconocidas**")
-        st.caption("Indica qué columna de tu CSV corresponde a cada campo. Las opcionales pueden quedar sin asignar.")
-        for campo in faltan:
-            etiqueta = campo + ("" if campo in CAMPOS_CORE else " (opcional)")
-            elegido = st.selectbox(etiqueta, ["(ninguna)"] + list(df_raw.columns), key=f"map_{huella[:8]}_{campo}")
-            if elegido != "(ninguna)":
-                mapeo[campo] = elegido
+# ==========================================
+# 4. COLUMNAS: DETECCIÓN AUTOMÁTICA + CONFIRMACIÓN
+# ==========================================
+mapeo = {}
+with st.expander("🧩 Columnas del archivo · detectadas automáticamente (puedes corregirlas)",
+                 expanded=bool(faltan_ini)):
+    if faltan_ini:
+        st.warning("No pude reconocer: **" + ", ".join(faltan_ini) + "**. Elígelas en la lista correspondiente.")
+    opciones_col = ["(ninguna)"] + list(df_raw.columns)
+    grid = st.columns(3)
+    for i, campo in enumerate(CAMPOS):
+        defecto = campo if campo in df_raw.columns else sug.get(campo, "(ninguna)")
+        etiqueta = campo + ("" if campo in CAMPOS_CORE else " (opcional)")
+        elegido = grid[i % 3].selectbox(etiqueta, opciones_col, index=opciones_col.index(defecto),
+                                        key=f"map_{huella[:8]}_{campo}")
+        if elegido not in ("(ninguna)", campo):
+            mapeo[campo] = elegido
 
     disponibles = set(df_raw.columns) | set(mapeo)
+    ajustes = st.columns(2)
 
-    # ¿Margen_Bruto es un monto o un porcentaje? Se sugiere según los valores.
     margen_es_pct = False
     if "Margen_Bruto" in disponibles:
         sugiere_pct = False
@@ -251,47 +330,37 @@ with exp_datos:
             sugiere_pct = len(m) > 0 and len(v) > 0 and m.between(0, 100).all() and v.median() > 100
         except Exception:  # noqa: BLE001
             pass
-        opcion = st.radio("Margen_Bruto está expresado como…", ["Monto (US$)", "Porcentaje (%)"],
-                          index=1 if sugiere_pct else 0, key=f"margen_{huella[:8]}")
+        opcion = ajustes[0].radio("Margen_Bruto está expresado como…", ["Monto (US$)", "Porcentaje (%)"],
+                                  index=1 if sugiere_pct else 0, key=f"margen_{huella[:8]}")
         margen_es_pct = opcion == "Porcentaje (%)"
 
     META_REPETIDA = True
     if "Meta_Venta" in disponibles:
-        opcion = st.radio("Meta_Venta se registra…",
-                          ["Repetida en cada pedido (provincia y mes)", "Un valor por pedido (se suma)"],
-                          key=f"meta_{huella[:8]}")
+        opcion = ajustes[1].radio("Meta_Venta se registra…",
+                                  ["Repetida en cada pedido (provincia y mes)", "Un valor por pedido (se suma)"],
+                                  key=f"meta_{huella[:8]}")
         META_REPETIDA = opcion.startswith("Repetida")
 
-    st.caption("Columnas detectadas: " + ", ".join(df_raw.columns))
+# Validaciones del contenido de las columnas elegidas (evita asignaciones absurdas).
+problemas = []
+for campo in ("Hubo_Reclamo", "Entrega_A_Tiempo"):
+    o = mapeo.get(campo, campo)
+    if o in df_raw.columns and df_raw[o].nunique(dropna=True) > 3:
+        problemas.append(f"**{campo}** debería tener solo dos valores (Sí/No), pero `{o}` tiene "
+                         f"{df_raw[o].nunique()} valores distintos.")
+for campo in ("Venta_Neta", "Margen_Bruto"):
+    o = mapeo.get(campo, campo)
+    if o in df_raw.columns and a_numero(df_raw[o]).notna().mean() < 0.5:
+        problemas.append(f"**{campo}** debería ser numérica, pero `{o}` no lo parece.")
+for p in problemas:
+    st.warning("⚠️ " + p)
 
 df_base = preparar_datos(df_raw, huella, tuple(sorted(mapeo.items())), margen_es_pct)
 
-faltan_core = [c for c in CAMPOS_CORE if c not in df_base.columns]
-if faltan_core:
-    st.warning(
-        f"⚠️ Faltan columnas obligatorias: **{', '.join(faltan_core)}**. "
-        "Asígnalas en la barra lateral → **⚙️ Datos y definiciones**. Mientras tanto verás solo lo que se puede calcular."
-    )
-
-# --- 3.3 Navegación ---
-ETIQUETAS_NIVEL = {
-    "1. Visión Ejecutiva (Nacional)": "🏛️  Visión Ejecutiva",
-    "2. Diagnóstico Territorial": "🗺️  Diagnóstico Territorial",
-    "3. Detalle Operativo": "🔧  Detalle Operativo",
-}
-NIVEL_1, NIVEL_2, NIVEL_3 = list(ETIQUETAS_NIVEL)
-
-with caja_nav:
-    st.markdown("### 🧭 Navegación")
-    nivel_pagina = st.radio(
-        "Nivel de análisis",
-        list(ETIQUETAS_NIVEL),
-        format_func=lambda x: ETIQUETAS_NIVEL[x],
-        label_visibility="collapsed",
-    )
-
-# --- 3.4 Filtros ---
-CLAVES_FILTROS = ["f_preset", "f_rango", "f_prov", "f_ciudad", "f_canal", "f_linea"]
+# ==========================================
+# 5. FILTROS VISIBLES (arriba de la página)
+# ==========================================
+CLAVES_FILTROS = ["f_preset", "f_rango", "f_prov", "f_canal", "f_ciudad", "f_linea"]
 
 
 def reiniciar_filtros():
@@ -299,58 +368,93 @@ def reiniciar_filtros():
         st.session_state.pop(k, None)
 
 
-def filtro_multi(df: pd.DataFrame, col: str, etiqueta: str, clave: str) -> pd.DataFrame:
-    """Multiselect en cascada: vacío = todas las opciones."""
-    if col not in df.columns:
-        return df
-    opciones = sorted(df[col].dropna().unique())
+def selector(label: str, opciones: list, clave: str) -> list:
+    """Botones tipo 'pill' si hay pocas opciones; lista desplegable si hay muchas. Vacío = todas."""
     st.session_state[clave] = [v for v in st.session_state.get(clave, []) if v in opciones]
-    seleccion = st.multiselect(etiqueta, opciones, key=clave, placeholder="Todas")
-    return df[df[col].isin(seleccion)] if seleccion else df
+    if hasattr(st, "pills") and len(opciones) <= 8:
+        return list(st.pills(label, opciones, selection_mode="multi", key=clave) or [])
+    return st.multiselect(label, opciones, key=clave, placeholder="Todas")
+
+
+def aplicar(df: pd.DataFrame, col: str, seleccion: list) -> pd.DataFrame:
+    return df[df[col].isin(seleccion)] if (seleccion and col in df.columns) else df
 
 
 df_filtrado = df_base.copy()
+resumen_filtros = []
 
-with caja_filtros:
-    st.divider()
-    c_tit, c_btn = st.columns([1.4, 1])
-    c_tit.markdown("### 🎛️ Filtros")
-    c_btn.button("↺ Limpiar", on_click=reiniciar_filtros, **AN_BTN)
+with st.container(border=True):
+    f1, f2, f3, f4 = st.columns([1.2, 2.2, 1.6, 0.6], vertical_alignment="top")
 
-    if "Fecha" in df_filtrado.columns and df_filtrado["Fecha"].notna().any():
-        f_min, f_max = df_filtrado["Fecha"].min().date(), df_filtrado["Fecha"].max().date()
-        with st.expander("📅 Periodo", expanded=True):
-            preset = st.selectbox(
-                "Atajo",
-                ["Todo el periodo", "Últimos 30 días", "Últimos 90 días", "Personalizado"],
-                key="f_preset",
-            )
+    with f1:
+        if "AñoMes" in df_filtrado.columns and df_filtrado["Fecha"].notna().any():
+            f_min, f_max = df_filtrado["Fecha"].min().date(), df_filtrado["Fecha"].max().date()
+            meses = sorted(df_filtrado["AñoMes"].dropna().unique())
+            opciones_periodo = (["Todo el periodo", "Últimos 30 días", "Últimos 90 días"]
+                                + [f"Mes {m}" for m in meses] + ["Personalizado"])
+            preset = st.selectbox("📅 Periodo", opciones_periodo, key="f_preset")
             if preset == "Últimos 30 días":
                 f_ini, f_fin = max(f_min, f_max - timedelta(days=29)), f_max
             elif preset == "Últimos 90 días":
                 f_ini, f_fin = max(f_min, f_max - timedelta(days=89)), f_max
+            elif preset.startswith("Mes "):
+                mes = preset[4:]
+                f_ini = df_filtrado.loc[df_filtrado["AñoMes"] == mes, "Fecha"].min().date()
+                f_fin = df_filtrado.loc[df_filtrado["AñoMes"] == mes, "Fecha"].max().date()
             elif preset == "Personalizado":
                 rango = st.date_input("Rango", value=(f_min, f_max), min_value=f_min, max_value=f_max, key="f_rango")
                 f_ini, f_fin = rango if isinstance(rango, (tuple, list)) and len(rango) == 2 else (f_min, f_max)
             else:
                 f_ini, f_fin = f_min, f_max
-            st.caption(f"📆 {f_ini:%d/%m/%Y} → {f_fin:%d/%m/%Y}")
-        fechas = df_filtrado["Fecha"].dt.date
-        df_filtrado = df_filtrado[(fechas >= f_ini) & (fechas <= f_fin)]
+            fechas = df_filtrado["Fecha"].dt.date
+            df_filtrado = df_filtrado[(fechas >= f_ini) & (fechas <= f_fin)]
+            if preset != "Todo el periodo":
+                resumen_filtros.append(f"Periodo: {f_ini:%d/%m/%Y} → {f_fin:%d/%m/%Y}")
+        else:
+            st.caption("📅 Sin columna de fecha: el filtro de periodo no está disponible.")
 
-    with st.expander("📍 Territorio", expanded=True):
-        df_filtrado = filtro_multi(df_filtrado, "Provincia", "Provincia", "f_prov")
-        df_filtrado = filtro_multi(df_filtrado, "Ciudad", "Ciudad", "f_ciudad")
+    with f2:
+        if "Provincia" in df_filtrado.columns:
+            sel_prov = selector("📍 Provincia", sorted(df_filtrado["Provincia"].dropna().unique()), "f_prov")
+            df_filtrado = aplicar(df_filtrado, "Provincia", sel_prov)
+            if sel_prov:
+                resumen_filtros.append("Provincia: " + ", ".join(sel_prov))
 
-    with st.expander("🛒 Canal y servicio", expanded=False):
-        df_filtrado = filtro_multi(df_filtrado, "Canal", "Canal", "f_canal")
-        df_filtrado = filtro_multi(df_filtrado, "Linea_Servicio", "Línea de servicio", "f_linea")
+    with f3:
+        if "Canal" in df_filtrado.columns:
+            sel_canal = selector("🛒 Canal", sorted(df_filtrado["Canal"].dropna().unique()), "f_canal")
+            df_filtrado = aplicar(df_filtrado, "Canal", sel_canal)
+            if sel_canal:
+                resumen_filtros.append("Canal: " + ", ".join(sel_canal))
 
-    pct = len(df_filtrado) / max(len(df_base), 1)
-    st.progress(pct, text=f"{len(df_filtrado):,} de {len(df_base):,} pedidos ({pct:.0%})")
+    with f4:
+        st.write("")
+        st.button("↺ Limpiar", on_click=reiniciar_filtros, **AN_BTN)
+
+    if "Ciudad" in df_filtrado.columns or "Linea_Servicio" in df_filtrado.columns:
+        with st.expander("Más filtros (ciudad, línea de servicio)"):
+            g1, g2 = st.columns(2)
+            with g1:
+                if "Ciudad" in df_filtrado.columns:
+                    sel_ciudad = st.multiselect("Ciudad", sorted(df_filtrado["Ciudad"].dropna().unique()),
+                                                key="f_ciudad", placeholder="Todas")
+                    df_filtrado = aplicar(df_filtrado, "Ciudad", sel_ciudad)
+                    if sel_ciudad:
+                        resumen_filtros.append("Ciudad: " + ", ".join(sel_ciudad))
+            with g2:
+                if "Linea_Servicio" in df_filtrado.columns:
+                    sel_linea = st.multiselect("Línea de servicio", sorted(df_filtrado["Linea_Servicio"].dropna().unique()),
+                                               key="f_linea", placeholder="Todas")
+                    df_filtrado = aplicar(df_filtrado, "Linea_Servicio", sel_linea)
+                    if sel_linea:
+                        resumen_filtros.append("Línea: " + ", ".join(sel_linea))
+
+pct = len(df_filtrado) / max(len(df_base), 1)
+st.caption(f"📄 {nombre_archivo} · mostrando **{len(df_filtrado):,}** de {len(df_base):,} pedidos ({pct:.0%})"
+           + (" · " + " · ".join(resumen_filtros) if resumen_filtros else ""))
 
 if df_filtrado.empty:
-    st.warning("⚠️ Los filtros actuales no devuelven resultados. Pulsa **↺ Limpiar** o amplía la selección.")
+    st.warning("Los filtros actuales no devuelven resultados. Pulsa **↺ Limpiar** o amplía la selección.")
     st.stop()
 
 base = df_base      # referencia: todos los datos
@@ -358,20 +462,15 @@ d = df_filtrado     # lo que ve el usuario
 HAY_FILTROS = len(d) != len(base)
 
 # ==========================================
-# 4. FUNCIONES DE CÁLCULO Y PRESENTACIÓN
+# 6. FUNCIONES DE CÁLCULO Y PRESENTACIÓN
 # ==========================================
 NOMBRE_VISIBLE = {"AñoMes": "Fecha"}
-
-
-def encabezado(titulo: str, subtitulo: str):
-    st.markdown(f"<div class='main-title'>{titulo}</div>", unsafe_allow_html=True)
-    st.markdown(f"<div class='sub-title'>{subtitulo}</div>", unsafe_allow_html=True)
 
 
 def necesita(x: pd.DataFrame, cols) -> bool:
     falta = [NOMBRE_VISIBLE.get(c, c) for c in cols if c not in x.columns]
     if falta:
-        st.info(f"Para este gráfico falta: **{', '.join(falta)}**. Asígnala en la barra lateral → ⚙️ Datos y definiciones.")
+        st.info(f"Para este gráfico falta: **{', '.join(falta)}**. Revisa «🧩 Columnas del archivo» arriba.")
         return False
     return True
 
@@ -458,12 +557,11 @@ DEFINICIONES = pd.DataFrame([
      "Fuente": "Entrega_A_Tiempo", "Responsable (propuesto)": "Operaciones"},
 ])
 
-# ==========================================
-# 5. PÁGINA 1: VISIÓN EJECUTIVA
-# ==========================================
-if nivel_pagina == NIVEL_1:
-    encabezado("Visión Ejecutiva Nacional", "Monitoreo macro de ventas, márgenes y desempeño territorial.")
 
+# ==========================================
+# 7. PÁGINAS
+# ==========================================
+def pagina_ejecutiva():
     t1, t2, t3, t4, t5 = st.columns(5)
     tarjeta(t1, "Ventas netas", K.get("venta"), "${:,.0f}", ayuda="Suma de Venta_Neta")
     tarjeta(t2, "Margen bruto", K.get("margen_pct"), "{:.1f}%", K0.get("margen_pct"), unidad=" pp",
@@ -475,7 +573,6 @@ if nivel_pagina == NIVEL_1:
     tarjeta(t5, "Entrega a tiempo (OTD)", K.get("otd"), "{:.1f}%", K0.get("otd"), unidad=" pp",
             ayuda="Pedidos entregados a tiempo ÷ total de pedidos")
 
-    # Lectura automática
     if "Provincia" in d and d["Provincia"].nunique() > 1:
         r = resumen_por(d, "Provincia")
         msgs = []
@@ -494,8 +591,6 @@ if nivel_pagina == NIVEL_1:
         if msgs:
             st.info("\n\n".join(msgs))
             st.caption("Estas lecturas describen asociaciones en los datos; no establecen causas sin un análisis adicional.")
-
-    st.divider()
 
     c1, c2 = st.columns([1, 1.3])
     with c1:
@@ -555,72 +650,63 @@ if nivel_pagina == NIVEL_1:
         st.dataframe(DEFINICIONES, hide_index=True, **AN_DF)
         st.caption("Los responsables son una propuesta basada en las áreas del caso; deben validarse con la gerencia.")
 
-# ==========================================
-# 6. PÁGINA 2: DIAGNÓSTICO TERRITORIAL
-# ==========================================
-elif nivel_pagina == NIVEL_2:
-    encabezado("Diagnóstico Territorial y Canales", "Cómo se reparte el desempeño entre provincias y canales.")
 
-    if necesita(d, ["Provincia", "Canal"]):
-        tab_comp, tab_calor, tab_disp, tab_tabla = st.tabs(
-            ["🌞 Composición", "🔥 Mapa de calor", "🎯 Pedidos vs. reclamos", "📋 Tabla comparativa"])
+def pagina_territorial():
+    if not necesita(d, ["Provincia", "Canal"]):
+        return
+    tab_comp, tab_calor, tab_disp, tab_tabla = st.tabs(
+        ["🌞 Composición", "🔥 Mapa de calor", "🎯 Pedidos vs. reclamos", "📋 Tabla comparativa"])
+    opciones = ["Pedidos"] + (["Ventas netas"] if "Venta_Neta" in d else [])
 
-        opciones = ["Pedidos"] + (["Ventas netas"] if "Venta_Neta" in d else [])
+    with tab_comp:
+        metrica = st.radio("Medir por", opciones, horizontal=True, key="metrica_comp")
+        if metrica == "Ventas netas":
+            fig = px.sunburst(d[d["Venta_Neta"] > 0], path=["Provincia", "Canal"], values="Venta_Neta")
+        else:
+            fig = px.sunburst(d, path=["Provincia", "Canal"])
+        fig.update_traces(textinfo="label+percent parent")
+        mostrar(fig, "p2_sunburst", alto=480)
 
-        with tab_comp:
-            metrica = st.radio("Medir por", opciones, horizontal=True, key="metrica_comp")
-            if metrica == "Ventas netas":
-                dd = d[d["Venta_Neta"] > 0]
-                fig = px.sunburst(dd, path=["Provincia", "Canal"], values="Venta_Neta")
-            else:
-                fig = px.sunburst(d, path=["Provincia", "Canal"])
-            fig.update_traces(textinfo="label+percent parent")
-            mostrar(fig, "p2_sunburst", alto=480)
+    with tab_calor:
+        metrica2 = st.radio("Medir por", opciones, horizontal=True, key="metrica_calor")
+        if metrica2 == "Ventas netas":
+            piv = pd.crosstab(d["Provincia"], d["Canal"], values=d["Venta_Neta"], aggfunc="sum").fillna(0)
+        else:
+            piv = pd.crosstab(d["Provincia"], d["Canal"])
+        fig = px.imshow(piv, text_auto=".2s", aspect="auto", color_continuous_scale="Blues")
+        fig.update_layout(xaxis_title=None, yaxis_title=None)
+        mostrar(fig, "p2_calor", alto=420)
 
-        with tab_calor:
-            metrica2 = st.radio("Medir por", opciones, horizontal=True, key="metrica_calor")
-            if metrica2 == "Ventas netas":
-                piv = pd.crosstab(d["Provincia"], d["Canal"], values=d["Venta_Neta"], aggfunc="sum").fillna(0)
-            else:
-                piv = pd.crosstab(d["Provincia"], d["Canal"])
-            fig = px.imshow(piv, text_auto=".2s", aspect="auto", color_continuous_scale="Blues")
-            fig.update_layout(xaxis_title=None, yaxis_title=None)
-            mostrar(fig, "p2_calor", alto=420)
-
-        with tab_disp:
-            if necesita(d, ["Hubo_Reclamo"]):
-                r = resumen_por(d, "Provincia")
-                tamano = r["Venta_Neta"].fillna(0).clip(lower=0) if "Venta_Neta" in r else None
-                fig = px.scatter(r, x="Pedidos", y="Reclamos_x1000", size=tamano,
-                                 color="OTD_%" if "OTD_%" in r else None,
-                                 text="Provincia", color_continuous_scale="RdYlGn", size_max=45)
-                fig.update_traces(textposition="top center")
-                fig.update_layout(xaxis_title="Pedidos", yaxis_title="Reclamos por 1.000 pedidos")
-                mostrar(fig, "p2_scatter", alto=450)
-                st.caption("Cada burbuja es una provincia: tamaño = ventas netas, color = entrega a tiempo. "
-                           "Compara tasas, no conteos. Una asociación visible aquí no demuestra causalidad.")
-
-        with tab_tabla:
+    with tab_disp:
+        if necesita(d, ["Hubo_Reclamo"]):
             r = resumen_por(d, "Provincia")
-            if "Venta_Neta" in r:
-                r = r.sort_values("Venta_Neta", ascending=False)
-            st.dataframe(
-                r, hide_index=True, **AN_DF,
-                column_config={
-                    "Venta_Neta": st.column_config.NumberColumn("Ventas netas", format="$ %.0f"),
-                    "Margen_%": st.column_config.ProgressColumn("Margen (%)", min_value=0, max_value=100, format="%.1f"),
-                    "Cumplimiento_%": st.column_config.NumberColumn("Cumplimiento (%)", format="%.1f"),
-                    "Reclamos_x1000": st.column_config.NumberColumn("Reclamos / 1.000", format="%.1f"),
-                    "OTD_%": st.column_config.ProgressColumn("Entrega a tiempo (%)", min_value=0, max_value=100, format="%.1f"),
-                    "Tiempo_medio": st.column_config.NumberColumn("Tiempo medio", format="%.1f"),
-                })
+            tamano = r["Venta_Neta"].fillna(0).clip(lower=0) if "Venta_Neta" in r else None
+            fig = px.scatter(r, x="Pedidos", y="Reclamos_x1000", size=tamano,
+                             color="OTD_%" if "OTD_%" in r else None,
+                             text="Provincia", color_continuous_scale="RdYlGn", size_max=45)
+            fig.update_traces(textposition="top center")
+            fig.update_layout(xaxis_title="Pedidos", yaxis_title="Reclamos por 1.000 pedidos")
+            mostrar(fig, "p2_scatter", alto=450)
+            st.caption("Cada burbuja es una provincia: tamaño = ventas netas, color = entrega a tiempo. "
+                       "Compara tasas, no conteos. Una asociación visible aquí no demuestra causalidad.")
 
-# ==========================================
-# 7. PÁGINA 3: DETALLE OPERATIVO
-# ==========================================
-else:
-    encabezado("Detalle Operativo y Granularidad", "Variabilidad de entregas, desempeño por canal y pedidos individuales.")
+    with tab_tabla:
+        r = resumen_por(d, "Provincia")
+        if "Venta_Neta" in r:
+            r = r.sort_values("Venta_Neta", ascending=False)
+        st.dataframe(
+            r, hide_index=True, **AN_DF,
+            column_config={
+                "Venta_Neta": st.column_config.NumberColumn("Ventas netas", format="$ %.0f"),
+                "Margen_%": st.column_config.ProgressColumn("Margen (%)", min_value=0, max_value=100, format="%.1f"),
+                "Cumplimiento_%": st.column_config.NumberColumn("Cumplimiento (%)", format="%.1f"),
+                "Reclamos_x1000": st.column_config.NumberColumn("Reclamos / 1.000", format="%.1f"),
+                "OTD_%": st.column_config.ProgressColumn("Entrega a tiempo (%)", min_value=0, max_value=100, format="%.1f"),
+                "Tiempo_medio": st.column_config.NumberColumn("Tiempo medio", format="%.1f"),
+            })
 
+
+def pagina_operativa():
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Distribución del tiempo de entrega")
@@ -648,8 +734,6 @@ else:
         st.caption("El coeficiente de variación (desv. estándar ÷ media) permite comparar la dispersión entre "
                    "provincias aunque sus tiempos medios sean distintos. P90: el 90 % de las entregas tarda ese tiempo o menos.")
 
-    st.divider()
-
     with st.expander("🧪 Calidad de datos"):
         cols_ok = [c for c in CAMPOS + ["AñoMes"] if c in base.columns]
         calidad = pd.DataFrame({
@@ -668,6 +752,15 @@ else:
         st.download_button("📥 Descargar datos filtrados (CSV)",
                            data=vista.to_csv(index=False).encode("utf-8-sig"),
                            file_name="reporte_logiandes_filtrado.csv", mime="text/csv")
+
+
+tab_ej, tab_te, tab_op = st.tabs(["🏛️ Visión ejecutiva", "🗺️ Diagnóstico territorial", "🔧 Detalle operativo"])
+with tab_ej:
+    pagina_ejecutiva()
+with tab_te:
+    pagina_territorial()
+with tab_op:
+    pagina_operativa()
 
 st.divider()
 st.caption("LogiAndes S.A. © 2026 · Prototipo BI en Streamlit · Datos de uso académico.")
