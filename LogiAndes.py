@@ -1,5 +1,9 @@
 """
-LogiAndes S.A. · Solución de Business Intelligence
+LogiAndes S.A. · Solución de Business Intelligence Accionable (Prueba Práctica 2)
+Diseño: Navegación Lateral por Áreas + LampLoginAnimation adaptada a Python/Streamlit
+
+Ejecutar:  streamlit run LogiAndes.py
+"""
 
 import hashlib
 import inspect
@@ -43,14 +47,8 @@ AN_DF = _kw_ancho(st.dataframe)
 AN_BTN = _kw_ancho(st.button)
 
 # ==========================================
-# 2. ESTADO REACTIVO: ADAPTACIÓN DE LampLoginAnimation
+# 2. ESTADO REACTIVO (Adaptación de LampLoginAnimation)
 # ==========================================
-# Equivalente en Python/Streamlit a:
-# const [email, setEmail] = useState('');
-# const [password, setPassword] = useState('');
-# const [showPassword, setShowPassword] = useState(false);
-# const [isLoading, setIsLoading] = useState(false);
-# const [lampOn, setLampOn] = useState(false);
 for k_state, v_def in {
     "email": "camila.andrade@logiandes.ec",
     "password": "",
@@ -64,11 +62,9 @@ for k_state, v_def in {
 
 
 # ==========================================
-# 3. ESTILOS VISUALES: LAMP EFFECT + SIDEBAR TABS + PILL NAV
+# 3. ESTILOS CSS (Lámpara reactiva + Sidebar + Pill Tabs)
 # ==========================================
 def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
-    """Inyecta el diseño inspirado en LampLoginAnimation y las pestañas fluidas."""
-    # Cuando lampOn es True, se enciende el haz de luz cónico superior y el resplandor de tarjetas
     lamp_beam_opacity = "1" if lamp_on else "0.08"
     lamp_fixture_glow = f"0 0 28px {color_acento}, 0 0 60px {color_acento}" if lamp_on else "none"
     lamp_cone_bg = (
@@ -77,7 +73,7 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
         if lamp_on
         else "transparent"
     )
-    card_border = f"rgba(244, 63, 94, 0.28)" if lamp_on else "rgba(148, 163, 184, 0.16)"
+    card_border = "rgba(244, 63, 94, 0.28)" if lamp_on else "rgba(148, 163, 184, 0.16)"
     card_shadow = (
         "0 10px 30px -10px rgba(244, 63, 94, 0.14), 0 4px 12px rgba(0, 0, 0, 0.06)"
         if lamp_on
@@ -93,9 +89,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 max-width: 1460px;
             }}
 
-            /* =====================================================
-               1. LÁMPARA REACTIVA SUPERIOR (LampLoginAnimation UI)
-               ===================================================== */
             .lamp-wrapper {{
                 position: relative;
                 width: 100%;
@@ -109,7 +102,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 color: #f8fafc;
             }}
 
-            /* Foco físico de la lámpara en el techo del banner */
             .lamp-bulb {{
                 width: 140px;
                 height: 6px;
@@ -122,7 +114,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 z-index: 3;
             }}
 
-            /* Haz de luz cónico animado */
             .lamp-cone {{
                 position: absolute;
                 top: -10px;
@@ -174,14 +165,10 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 backdrop-filter: blur(8px);
             }}
 
-            /* =====================================================
-               2. PESTAÑAS LATERALES IZQUIERDAS (ÁREAS DE LA EMPRESA)
-               ===================================================== */
             section[data-testid="stSidebar"] > div {{
                 padding-top: 1rem;
             }}
 
-            /* Convertir el radio de áreas en pestañas verticales estilizadas */
             section[data-testid="stSidebar"] div[role="radiogroup"] {{
                 gap: 0.42rem !important;
                 width: 100% !important;
@@ -200,7 +187,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 align-items: center !important;
             }}
 
-            /* Ocultar el círculo nativo del radio para que luzca como pestaña lateral */
             section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child {{
                 display: none !important;
             }}
@@ -217,7 +203,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 transform: translateX(4px) !important;
             }}
 
-            /* Pestaña lateral activa */
             section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) {{
                 background: linear-gradient(135deg, #e11d48 0%, #be123c 100%) !important;
                 border-color: #fda4af !important;
@@ -231,9 +216,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 font-weight: 700 !important;
             }}
 
-            /* =====================================================
-               3. NAVEGACIÓN SUPERIOR FLUIDA (CÁPSULA CON ARCO DE LUZ)
-               ===================================================== */
             div[data-testid="stTabs"] > div[role="tablist"] {{
                 background: linear-gradient(145deg, #141419 0%, #0d0d11 100%) !important;
                 border: 1px solid rgba(255, 255, 255, 0.1) !important;
@@ -286,7 +268,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 transform: translateY(-1px) !important;
             }}
 
-            /* Pestaña activa con arco luminoso estilo "Create" de la imagen */
             div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{
                 background: radial-gradient(circle at 50% 0%, {color_acento}4d 0%, {color_acento}12 75%) !important;
                 border-top: 2px solid {color_acento} !important;
@@ -308,7 +289,6 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
                 box-shadow: 0 0 8px {color_acento};
             }}
 
-            /* Contenedores iluminados sutilmente cuando la lámpara está encendida */
             div[data-testid="stVerticalBlockBorderWrapper"] {{
                 border-color: {card_border} !important;
                 box-shadow: {card_shadow} !important;
@@ -331,7 +311,7 @@ def inyectar_estilos_lamp(lamp_on: bool, color_acento: str = "#f43f5e"):
 
 
 # ==========================================
-# 4. MODELO DE DATOS: LECTURA, ALIAS Y LIMPIEZA
+# 4. MODELO DE DATOS
 # ==========================================
 CAMPOS_CORE = ["Provincia", "Canal", "Venta_Neta", "Margen_Bruto", "Hubo_Reclamo", "Entrega_A_Tiempo"]
 CAMPOS_OPCIONALES = ["Fecha", "Ciudad", "Linea_Servicio", "Tiempo_Entrega", "Meta_Venta"]
@@ -368,7 +348,7 @@ def _leer(contenido: bytes) -> pd.DataFrame:
         for sep in (None, ";", ",", "\t"):
             try:
                 df = pd.read_csv(io.BytesIO(contenido), sep=sep, engine="python", encoding=enc)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 ultimo = e
                 continue
             if df.shape[1] > 1:
@@ -542,7 +522,7 @@ def preparar_datos(_df: pd.DataFrame, huella: str, mapeo: tuple, margen_es_pct: 
 
 
 # ==========================================
-# 5. DEFINICIÓN DE LAS 5 ÁREAS EMPRESARIALES (LATERAL IZQUIERDO)
+# 5. ÁREAS EMPRESARIALES (BARRA LATERAL)
 # ==========================================
 AREAS_EMPRESA = {
     "🌐 Todas las áreas · Vista Integral": {
@@ -584,14 +564,13 @@ AREAS_EMPRESA = {
 }
 
 # ==========================================
-# 6. BARRA LATERAL IZQUIERDA: PESTAÑAS DE ÁREAS + LAMP LOGIN COMPONENT
+# 6. BARRA LATERAL (Áreas + Lamp Login Gobernanza)
 # ==========================================
 CARPETA_DEFECTO = Path(__file__).resolve().parent
 
 st.sidebar.markdown("### 🚚 LogiAndes S.A. · BI")
 st.sidebar.caption("Selecciona el área empresarial para adaptar el enfoque del tablero:")
 
-# 6.1 PESTAÑAS LATERALES DE LAS ÁREAS DE LA EMPRESA
 area_activa = st.sidebar.radio(
     "🏢 Áreas de la Empresa",
     list(AREAS_EMPRESA.keys()),
@@ -603,42 +582,38 @@ info_area = AREAS_EMPRESA[area_activa]
 
 st.sidebar.divider()
 
-# 6.2 COMPONENTE LampLoginAnimation ADAPTADO AL SIDEBAR (Gobernanza & Luz Reactiva)
 with st.sidebar.expander("💡 Lamp Login · Gobernanza", expanded=False):
-    st.caption("Adaptación interactiva de `LampLoginAnimation` (Control de iluminación y acceso a datos sensibles):")
+    st.caption("Control de iluminación (`lampOn`) y acceso seguro a datos sensibles:")
 
-    # Switch directo de la lámpara (const [lampOn, setLampOn] = useState(false))
     st.session_state["lampOn"] = st.toggle(
-        "Encender lámpara del Dashboard (`lampOn`)",
+        "Encender lámpara del Dashboard",
         value=st.session_state["lampOn"],
     )
 
     st.session_state["email"] = st.text_input(
-        "Correo corporativo (`email`)",
+        "Correo corporativo",
         value=st.session_state["email"],
         placeholder="usuario@logiandes.ec",
     )
 
-    # Botón Eye / EyeOff (import { Eye, EyeOff } from 'lucide-react')
     c_pass, c_eye = st.columns([3.8, 1.2], vertical_alignment="bottom")
     with c_eye:
         icono_ojo = "🙈" if st.session_state["showPassword"] else "👁️"
-        if st.button(icono_ojo, key="btn_eye", help="Mostrar / ocultar contraseña (Eye / EyeOff)", **AN_BTN):
+        if st.button(icono_ojo, key="btn_eye", help="Mostrar / ocultar contraseña", **AN_BTN):
             st.session_state["showPassword"] = not st.session_state["showPassword"]
             st.rerun()
     with c_pass:
         st.session_state["password"] = st.text_input(
-            "Clave de auditor (`password`)",
+            "Clave de auditor",
             value=st.session_state["password"],
             type="default" if st.session_state["showPassword"] else "password",
-            placeholder="Ingresa cualquier clave…",
+            placeholder="Contraseña…",
         )
 
-    # Equivalente a handleSubmit = (e) => { setIsLoading(true); setLampOn(true); ... }
-    if st.button("⚡ Activar Modo Auditor (`handleSubmit`)", key="btn_lamp_submit", **AN_BTN):
+    if st.button("⚡ Activar Modo Auditor", key="btn_lamp_submit", **AN_BTN):
         st.session_state["isLoading"] = True
-        st.session_state["lampOn"] = True  # Turn on lamp
-        with st.spinner("Encendiendo lámpara y verificando permisos (2s)…"):
+        st.session_state["lampOn"] = True
+        with st.spinner("Verificando permisos y encendiendo lámpara…"):
             time.sleep(0.8)
         st.session_state["isLoading"] = False
         st.session_state["authenticated"] = True
@@ -650,12 +625,10 @@ with st.sidebar.expander("💡 Lamp Login · Gobernanza", expanded=False):
             st.session_state["authenticated"] = False
             st.rerun()
     else:
-        st.caption("🔒 Vista estándar: columnas sensibles de vendedores/clientes protegidas.")
+        st.caption("🔒 Vista estándar: datos sensibles anonimizados.")
 
-# Inyectar el CSS con el estado actual de lampOn y el color del área seleccionada
 inyectar_estilos_lamp(st.session_state["lampOn"], info_area["color"])
 
-# 6.3 ORIGEN DE DATOS EN LA BARRA LATERAL
 contenido, nombre_archivo = None, ""
 with st.sidebar.expander("⚙️ Origen de datos (CSV)", expanded=True):
     carpeta = Path(st.text_input("Carpeta de datos", value=str(CARPETA_DEFECTO))).expanduser()
@@ -669,7 +642,7 @@ with st.sidebar.expander("⚙️ Origen de datos (CSV)", expanded=True):
             contenido = (carpeta / nombre_archivo).read_bytes()
 
 # ==========================================
-# 7. ENCABEZADO PRINCIPAL CON EL EFECTO DE LÁMPARA (LampLoginAnimation)
+# 7. ENCABEZADO CON EFECTO DE LÁMPARA
 # ==========================================
 estado_luz_txt = "💡 Lámpara encendida" if st.session_state["lampOn"] else "🌑 Lámpara apagada"
 st.markdown(
@@ -730,7 +703,7 @@ if "Margen_Bruto" in disponibles_actual and "Venta_Neta" in disponibles_actual:
         m_s = a_numero(df_raw[mapeo.get("Margen_Bruto", "Margen_Bruto")]).dropna()
         v_s = a_numero(df_raw[mapeo.get("Venta_Neta", "Venta_Neta")]).dropna()
         sugiere_pct_def = len(m_s) > 0 and len(v_s) > 0 and m_s.between(0, 100).all() and v_s.median() > 100
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 clave_margen = f"margen_{huella[:8]}"
@@ -748,7 +721,7 @@ META_REPETIDA = st.session_state.get(
 df_base = preparar_datos(df_raw, huella, tuple(sorted(mapeo.items())), margen_es_pct)
 
 # ==========================================
-# 8. FILTROS GLOBALES DOSIFICADOS (EVITA SOBREINTERACTIVIDAD)
+# 8. FILTROS GLOBALES DOSIFICADOS
 # ==========================================
 CLAVES_FILTROS = ["f_preset", "f_rango", "f_prov", "f_canal", "f_ciudad", "f_linea"]
 
@@ -845,7 +818,7 @@ d = df_filtrado
 HAY_FILTROS = len(d) != len(base)
 
 # ==========================================
-# 9. FUNCIONES DE CÁLCULO, SEMÁFOROS Y FICHA TÉCNICA DE KPIS
+# 9. FUNCIONES DE CÁLCULO Y KPIS
 # ==========================================
 NOMBRE_VISIBLE = {"AñoMes": "Fecha"}
 
@@ -1017,10 +990,9 @@ FICHA_TECNICA_KPIS = pd.DataFrame([
 
 
 # ==========================================
-# 10. VISTAS DE LOS 4 NIVELES DE NAVEGACIÓN SUPERIOR
+# 10. VISTAS DE NAVEGACIÓN SUPERIOR
 # ==========================================
 def render_tarjetas_superiores():
-    """Muestra las 5 tarjetas KPI destacando con ⭐ las que pertenecen al Área seleccionada en la barra lateral."""
     t1, t2, t3, t4, t5 = st.columns(5)
     sem_cumpl = evaluar_umbral(K.get("cumplimiento"), 95.0, 85.0, menor_es_mejor=False)
     sem_margen = evaluar_umbral(K.get("margen_pct"), 25.0, 18.0, menor_es_mejor=False)
@@ -1057,7 +1029,6 @@ def render_tarjetas_superiores():
 def pagina_ejecutiva():
     render_tarjetas_superiores()
 
-    # Lectura dinámica adaptada al Área seleccionada en la barra lateral
     if "Provincia" in d and d["Provincia"].nunique() > 1:
         r = resumen_por(d, "Provincia")
         msgs = []
@@ -1459,7 +1430,7 @@ def pagina_ficha_y_gobernanza():
 
 
 # ==========================================
-# 11. NAVEGACIÓN SUPERIOR FLUIDA (4 SECCIONES)
+# 11. NAVEGACIÓN SUPERIOR FLUIDA
 # ==========================================
 tab_ej, tab_te, tab_op, tab_bi = st.tabs([
     "🏛️  \n1. Visión Ejecutiva",
