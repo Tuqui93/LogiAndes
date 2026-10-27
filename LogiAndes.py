@@ -1,11 +1,9 @@
 """
-LogiAndes S.A. · Sistema de Business Intelligence y Monitoreo Operativo
-Materia: Visualización, Storytelling y Business Intelligence (Prueba Práctica 2)
-
-
-
+LogiAndes S.A. · Dashboard de Business Intelligence (Prueba Práctica 2)
+Ejecutar:  streamlit run app.py
+Todos los cálculos provienen de kpis.py, el mismo módulo que usa el Notebook.
+"""
 import inspect
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -13,19 +11,49 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# ==========================================
-# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS SOBRIOS
-# ==========================================
-st.set_page_config(
-    page_title="LogiAndes S.A. · BI Dashboard",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+import kpis as K
+
+# ---------------------------------------------------------------------------
+# Configuración y estilo
+# ---------------------------------------------------------------------------
+st.set_page_config(page_title="LogiAndes S.A. · Monitoreo BI", page_icon="📊", layout="wide",
+                   initial_sidebar_state="collapsed")
+
+NAVY, AZUL, ACERO, GRIS, LINEA = "#0B2545", "#1D4E89", "#7F9BB8", "#6B7785", "#E3E8EF"
+COLOR_ESTADO = {"verde": "#2F7D5B", "amarillo": "#B7791F", "rojo": "#B4443C", "nd": "#9AA5B1"}
+FONDO_ESTADO = {"verde": "#E3F1EA", "amarillo": "#F7EBCF", "rojo": "#F5DCD9", "nd": "#EEF1F5"}
+TXT_ESTADO = {"verde": "En meta", "amarillo": "Seguimiento", "rojo": "Acción requerida", "nd": "Sin dato"}
+
+st.markdown(f"""
+<style>
+.block-container {{ max-width: 1360px; padding-top: 1.6rem; padding-bottom: 2rem; }}
+footer, #MainMenu {{ visibility: hidden; }}
+h1,h2,h3 {{ color: {NAVY}; letter-spacing: -0.01em; }}
+.titulo {{ font-size: 1.55rem; font-weight: 700; color: {NAVY}; margin: 0; line-height: 1.2; }}
+.subtitulo {{ font-size: .86rem; color: {GRIS}; margin: .15rem 0 .9rem 0; }}
+
+/* Navegación minimalista: pestañas con subrayado */
+div[data-testid="stTabs"] [role="tablist"] {{ gap: 1.7rem; border-bottom: 1px solid {LINEA}; }}
+div[data-testid="stTabs"] button[role="tab"] {{ padding: .55rem 0 .65rem 0; background: transparent; height: auto; }}
+div[data-testid="stTabs"] button[role="tab"] p {{ font-size: .93rem; font-weight: 500; color: {GRIS}; }}
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] p {{ color: {NAVY}; font-weight: 700; }}
+div[data-testid="stTabs"] div[data-baseweb="tab-highlight"] {{ background-color: {NAVY} !important; height: 2px; }}
+div[data-testid="stTabs"] div[data-baseweb="tab-border"] {{ background-color: transparent !important; }}
+
+/* Tarjetas KPI */
+.kpi {{ border: 1px solid {LINEA}; border-radius: 10px; padding: .95rem 1.05rem .85rem; background: #fff; height: 100%; }}
+.kpi-t {{ font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: {GRIS}; font-weight: 600; }}
+.kpi-v {{ font-size: 1.85rem; font-weight: 700; color: {NAVY}; line-height: 1.25; margin: .15rem 0 .05rem; }}
+.kpi-d {{ font-size: .78rem; min-height: 1.1rem; }}
+.kpi-s {{ font-size: .78rem; margin-top: .45rem; padding-top: .45rem; border-top: 1px solid {LINEA}; color: #334155; }}
+.dot {{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:.4rem; }}
+.seccion {{ font-size: 1.02rem; font-weight: 650; color: {NAVY}; margin: 1.1rem 0 .1rem; }}
+.nota {{ font-size: .78rem; color: {GRIS}; }}
+</style>
+""", unsafe_allow_html=True)
 
 
 def _kw_ancho(fn):
-    """Compatibilidad entre versiones de Streamlit para ancho completo."""
     try:
         p = inspect.signature(fn).parameters.get("width")
         if p is not None and p.default is not None:
@@ -35,838 +63,475 @@ def _kw_ancho(fn):
     return {"use_container_width": True}
 
 
-AN_PLOT = _kw_ancho(st.plotly_chart)
-AN_DF = _kw_ancho(st.dataframe)
-AN_BTN = _kw_ancho(st.button)
-
-st.markdown(
-    """
-    <style>
-        .block-container { padding-top: 1.2rem; padding-bottom: 2.2rem; max-width: 1420px; }
-        .top-header {
-            display: flex; align-items: center; justify-content: space-between;
-            padding-bottom: 0.6rem; border-bottom: 1px solid rgba(148, 163, 184, 0.25);
-            margin-bottom: 0.8rem;
-        }
-        .brand-box { display: flex; align-items: center; gap: 0.75rem; }
-        .brand-badge {
-            background: #1e3a8a; color: #ffffff; font-weight: 800; font-size: 1.15rem;
-            width: 40px; height: 40px; border-radius: 10px;
-            display: flex; align-items: center; justify-content: center;
-        }
-        .main-title { font-size: 1.45rem; font-weight: 800; margin: 0; line-height: 1.15; }
-        .sub-title { font-size: 0.84rem; opacity: 0.78; margin: 0; }
-        .semaforo-pill {
-            display: inline-block; padding: 0.14rem 0.55rem; border-radius: 999px;
-            font-size: 0.72rem; font-weight: 600; margin-top: 0.15rem;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ==========================================
-# 2. REGLAS DE NEGOCIO, SUPUESTOS Y CARGA DIRECTA
-# ==========================================
-COLUMNAS_ESPERADAS = [
-    "pedido_id",
-    "fecha_pedido",
-    "region",
-    "provincia",
-    "canal_entrega",
-    "tipo_cliente",
-    "distancia_km",
-    "tiempo_individual_entrega_min",
-    "tiempo_atencion_min",
-    "ventas_asociadas_usd",
-    "reclamos_registrados",
-    "motivo_reclamo",
-]
-
-# SLA por defecto (minutos) justificado por las medianas empíricas del dataset:
-# Express (mediana ~87 min) -> SLA 120 min
-# Estándar urbano (mediana ~134 min) -> SLA 180 min
-# Programado (mediana ~157 min) -> SLA 210 min
-SLA_DEFAULT = {
-    "Express": 120,
-    "Estándar urbano": 180,
-    "Programado": 210,
-}
-
-MOTIVOS_OPERATIVOS = {"Demora en entrega", "Paquete con incidencia", "Incumplimiento de horario"}
-MOTIVOS_ATENCION = {"Falta de actualización", "Demora en atención"}
-MIN_EVENTOS_ESTABLE = 15  # Umbral de gobernanza para advertir muestras pequeñas de reclamos
+AN_PLOT, AN_DF = _kw_ancho(st.plotly_chart), _kw_ancho(st.dataframe)
 
 
-@st.cache_data(show_spinner="Cargando dataset oficial de LogiAndes S.A.…")
-def cargar_datos(ruta_o_buffer, nombre_archivo: str) -> pd.DataFrame:
-    if nombre_archivo.lower().endswith((".xlsx", ".xls")):
-        df = pd.read_excel(ruta_o_buffer)
-    else:
-        try:
-            df = pd.read_csv(ruta_o_buffer, encoding="utf-8-sig", sep=None, engine="python")
-        except Exception:
-            if hasattr(ruta_o_buffer, "seek"):
-                ruta_o_buffer.seek(0)
-            df = pd.read_csv(ruta_o_buffer, encoding="latin-1", sep=None, engine="python")
-
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    df["fecha_pedido"] = pd.to_datetime(df["fecha_pedido"], errors="coerce")
-    df["anio_mes"] = df["fecha_pedido"].dt.to_period("M").astype(str)
-
-    for col_num in ("distancia_km", "tiempo_individual_entrega_min", "tiempo_atencion_min", "ventas_asociadas_usd"):
-        if col_num in df.columns:
-            df[col_num] = pd.to_numeric(df[col_num], errors="coerce")
-
-    if "reclamos_registrados" in df.columns:
-        df["reclamos_registrados"] = pd.to_numeric(df["reclamos_registrados"], errors="coerce").fillna(0).astype(int)
-
-    for col_txt in ("region", "provincia", "canal_entrega", "tipo_cliente"):
-        if col_txt in df.columns:
-            df[col_txt] = df[col_txt].fillna("Sin dato").astype(str).str.strip()
-
-    if "motivo_reclamo" in df.columns:
-        df["motivo_reclamo"] = (
-            df["motivo_reclamo"]
-            .replace(["", "nan", "None", "null", "Sin reclamo", "N/A", "-"], np.nan)
-        )
-        df.loc[df["reclamos_registrados"] == 0, "motivo_reclamo"] = np.nan
-
-    return df
+def num(v, d=0, pre="", suf=""):
+    """Formato regional: 1.234,5"""
+    if v is None or pd.isna(v):
+        return "N/D"
+    s = f"{v:,.{d}f}".replace(",", "§").replace(".", ",").replace("§", ".")
+    return f"{pre}{s}{suf}"
 
 
-def aplicar_sla(df: pd.DataFrame, sla_map: dict) -> pd.DataFrame:
-    """Deriva la columna entrega_a_tiempo (0/1) según el SLA específico de cada canal_entrega."""
-    out = df.copy()
-    sla_serie = out["canal_entrega"].map(sla_map).fillna(180)
-    out["sla_canal_min"] = sla_serie
-    out["entrega_a_tiempo"] = (out["tiempo_individual_entrega_min"] <= out["sla_canal_min"]).astype(int)
-    out["exceso_sla_min"] = (out["tiempo_individual_entrega_min"] - out["sla_canal_min"]).clip(lower=0)
-    return out
-
-
-# ==========================================
-# 3. FUNCIÓN ÚNICA DE CÁLCULO (COMPARTIDA CON EL NOTEBOOK)
-# ==========================================
-def calcular_metricas(df: pd.DataFrame) -> dict:
-    """
-    Calcula los indicadores de negocio sobre cualquier subconjunto del dataset.
-    Esta misma función se utiliza en el Notebook para garantizar 100% de consistencia.
-    """
-    n_pedidos = len(df)
-    if n_pedidos == 0:
-        return {
-            "pedidos": 0, "ventas_usd": 0.0, "ticket_medio_usd": np.nan,
-            "distancia_total_km": 0.0, "usd_por_km": np.nan, "min_por_km": np.nan,
-            "reclamos_n": 0, "tasa_reclamos_x1000": np.nan, "muestra_pequena": True,
-            "otd_pct": np.nan, "tiempo_entrega_media": np.nan, "tiempo_entrega_mediana": np.nan,
-            "tiempo_entrega_p90": np.nan, "tiempo_atencion_media": np.nan,
-        }
-
-    ventas_usd = float(df["ventas_asociadas_usd"].sum())
-    distancia_km = float(df["distancia_km"].sum())
-    tiempo_total_min = float(df["tiempo_individual_entrega_min"].sum())
-    reclamos_n = int(df["reclamos_registrados"].sum())
-
-    return {
-        "pedidos": n_pedidos,
-        "ventas_usd": ventas_usd,
-        "ticket_medio_usd": ventas_usd / n_pedidos,
-        "distancia_total_km": distancia_km,
-        "usd_por_km": ventas_usd / distancia_km if distancia_km > 0 else np.nan,
-        "min_por_km": tiempo_total_min / distancia_km if distancia_km > 0 else np.nan,
-        "reclamos_n": reclamos_n,
-        "tasa_reclamos_x1000": (reclamos_n / n_pedidos) * 1000.0,
-        "muestra_pequena": (0 < reclamos_n < MIN_EVENTOS_ESTABLE) or (n_pedidos < 100),
-        "otd_pct": float(df["entrega_a_tiempo"].mean() * 100.0),
-        "tiempo_entrega_media": float(df["tiempo_individual_entrega_min"].mean()),
-        "tiempo_entrega_mediana": float(df["tiempo_individual_entrega_min"].median()),
-        "tiempo_entrega_p90": float(df["tiempo_individual_entrega_min"].quantile(0.90)),
-        "tiempo_atencion_media": float(df["tiempo_atencion_min"].mean()),
-    }
-
-
-def resumen_agrupado(df: pd.DataFrame, col_grupo: str) -> pd.DataFrame:
-    """Genera tabla resumen por cualquier dimensión (provincia, canal_entrega, tipo_cliente, anio_mes)."""
-    filas = []
-    for valor, grp in df.groupby(col_grupo, dropna=False):
-        m = calcular_metricas(grp)
-        m[col_grupo] = valor
-        filas.append(m)
-    res = pd.DataFrame(filas)
-    cols_orden = [
-        col_grupo, "pedidos", "ventas_usd", "ticket_medio_usd", "usd_por_km",
-        "reclamos_n", "tasa_reclamos_x1000", "otd_pct",
-        "tiempo_entrega_media", "tiempo_entrega_mediana", "tiempo_entrega_p90",
-        "tiempo_atencion_media", "muestra_pequena",
-    ]
-    return res[[c for c in cols_orden if c in res.columns]]
-
-
-def semaforo_kpi(valor, verde, amarillo, menor_es_mejor=False):
-    if valor is None or pd.isna(valor):
-        return "⚪ Sin dato", "#64748b", "rgba(100,116,139,0.12)"
-    if not menor_es_mejor:
-        if valor >= verde:
-            return "🟢 Óptimo (En meta)", "#15803d", "rgba(21,128,61,0.12)"
-        if valor >= amarillo:
-            return "🟡 Alerta (Seguimiento)", "#b45309", "rgba(180,83,9,0.12)"
-        return "🔴 Crítico (Bajo umbral)", "#b91c1c", "rgba(185,28,28,0.12)"
-    else:
-        if valor <= verde:
-            return "🟢 Óptimo (Controlado)", "#15803d", "rgba(21,128,61,0.12)"
-        if valor <= amarillo:
-            return "🟡 Alerta (Riesgo moderado)", "#b45309", "rgba(180,83,9,0.12)"
-        return "🔴 Crítico (Excede umbral)", "#b91c1c", "rgba(185,28,28,0.12)"
-
-
-# ==========================================
-# 4. LOCALIZACIÓN DEL ARCHIVO Y PARÁMETROS SLA
-# ==========================================
-CARPETA_ACTUAL = Path(__file__).resolve().parent
-archivos_locales = sorted(
-    [p for p in CARPETA_ACTUAL.iterdir() if p.suffix.lower() in (".csv", ".xlsx", ".xls")]
-)
-
-with st.sidebar:
-    st.header("⚙️ Parámetros y Supuestos")
-    if archivos_locales:
-        archivo_sel = st.selectbox(
-            "Dataset del repositorio",
-            archivos_locales,
-            format_func=lambda p: p.name,
-        )
-        subido = st.file_uploader("…o cargar otro archivo (.csv / .xlsx)", type=["csv", "xlsx", "xls"])
-    else:
-        archivo_sel = None
-        subido = st.file_uploader("Cargar dataset de LogiAndes (.csv / .xlsx)", type=["csv", "xlsx", "xls"])
-
-    st.divider()
-    st.subheader("⏱️ Supuesto SLA por Canal (min)")
-    st.caption(
-        "El dataset no incluye una columna binaria de OTD. Se deriva comparando "
-        "`tiempo_individual_entrega_min` contra el SLA de cada canal (basado en sus medianas de 87, 134 y 157 min)."
+def grafico(fig, clave, alto=340):
+    fig.update_layout(
+        height=alto, margin=dict(l=8, r=8, t=8, b=8), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, Segoe UI, Arial, sans-serif", size=12, color="#334155"),
+        separators=",.", legend_title_text="", hoverlabel=dict(bgcolor="white", font_size=12),
     )
-    sla_express = st.number_input("SLA Express (min)", min_value=30, max_value=300, value=120, step=5)
-    sla_estandar = st.number_input("SLA Estándar urbano (min)", min_value=60, max_value=360, value=180, step=5)
-    sla_programado = st.number_input("SLA Programado (min)", min_value=60, max_value=420, value=210, step=5)
-    meta_otd_global = st.slider("Meta de cumplimiento OTD (%)", min_value=70, max_value=98, value=85, step=1)
-    umbral_reclamos = st.number_input("Umbral meta de reclamos (/1.000)", min_value=5.0, max_value=60.0, value=25.0, step=2.5)
+    fig.update_xaxes(gridcolor="#EEF1F5", zeroline=False, linecolor=LINEA)
+    fig.update_yaxes(gridcolor="#EEF1F5", zeroline=False, linecolor=LINEA)
+    st.plotly_chart(fig, key=clave, config={"displaylogo": False, "displayModeBar": False}, **AN_PLOT)
 
-if subido is not None:
-    df_raw = cargar_datos(subido, subido.name)
-    nombre_fuente = subido.name
-elif archivo_sel is not None:
-    df_raw = cargar_datos(archivo_sel, archivo_sel.name)
-    nombre_fuente = archivo_sel.name
-else:
-    st.info("Sube el archivo CSV o Excel de **LogiAndes S.A.** en la barra lateral para iniciar.")
+
+def seccion(titulo, nota=None):
+    st.markdown(f"<div class='seccion'>{titulo}</div>", unsafe_allow_html=True)
+    if nota:
+        st.markdown(f"<div class='nota'>{nota}</div>", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Datos
+# ---------------------------------------------------------------------------
+@st.cache_data(show_spinner="Cargando datos…")
+def datos():
+    return K.cargar_datos()
+
+
+try:
+    base = datos()
+except Exception as e:  # noqa: BLE001
+    st.error(f"No se pudo cargar logiandes.csv: {e}")
     st.stop()
 
-faltantes = [c for c in COLUMNAS_ESPERADAS if c not in df_raw.columns]
-if faltantes:
-    st.error(f"El archivo cargado no contiene las columnas esperadas del caso: {', '.join(faltantes)}")
-    st.stop()
+MESES_TODOS = sorted(base["mes"].unique())
+OPC_PERIODO = {f"Trimestre ({K.nombre_mes(MESES_TODOS[0])[:3]}–{K.nombre_mes(MESES_TODOS[-1])[:3]})": MESES_TODOS}
+OPC_PERIODO.update({K.nombre_mes(m).split()[0]: [m] for m in MESES_TODOS})
+PERIODO_DEF = next(iter(OPC_PERIODO))
+CLAVES = ["f_periodo", "f_prov", "f_canal", "f_region", "f_cliente", "f_relacion", "f_enfoque"]
 
-sla_activo = {
-    "Express": sla_express,
-    "Estándar urbano": sla_estandar,
-    "Programado": sla_programado,
-}
-df_base = aplicar_sla(df_raw, sla_activo)
 
-# ==========================================
-# 5. CABECERA Y FILTROS GLOBALES CONCISOS
-# ==========================================
+def reiniciar():
+    for k in CLAVES:
+        st.session_state.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# Cabecera y filtros globales (solo tres: periodo, provincia, canal)
+# ---------------------------------------------------------------------------
+st.markdown("<div class='titulo'>LogiAndes S.A. · Monitoreo de desempeño</div>", unsafe_allow_html=True)
 st.markdown(
-    f"""
-    <div class='top-header'>
-        <div class='brand-box'>
-            <div class='brand-badge'>LA</div>
-            <div>
-                <div class='main-title'>LogiAndes S.A. · Sistema de Inteligencia de Negocios</div>
-                <div class='sub-title'>
-                    Nivel de análisis disponible en datos: <b>Provincial</b> (Pichincha, Guayas, Azuay, Manabí, Tungurahua, Loja)
-                    · Fuente activa: <b>{nombre_fuente}</b> ({len(df_base):,} pedidos)
-                </div>
-            </div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+    f"<div class='subtitulo'>Quito, Guayaquil, Cuenca, Manta, Ambato y Loja · pedidos de "
+    f"{K.nombre_mes(MESES_TODOS[0])} a {K.nombre_mes(MESES_TODOS[-1])} · análisis a nivel de provincia</div>",
+    unsafe_allow_html=True)
 
 with st.container(border=True):
-    f1, f2, f3, f4 = st.columns([1.2, 1.8, 1.5, 0.55], vertical_alignment="bottom")
-    with f1:
-        meses_disp = sorted(df_base["anio_mes"].dropna().unique())
-        sel_meses = st.multiselect("📅 Mes (2025)", meses_disp, default=[], placeholder="Todos (Ene–Mar)")
-    with f2:
-        prov_disp = sorted(df_base["provincia"].dropna().unique())
-        sel_prov = st.multiselect("📍 Provincia", prov_disp, default=[], placeholder="Todas las provincias")
-    with f3:
-        canal_disp = sorted(df_base["canal_entrega"].dropna().unique())
-        sel_canal = st.multiselect("🚚 Canal de entrega", canal_disp, default=[], placeholder="Todos los canales")
-    with f4:
-        if st.button("↺ Todo", **AN_BTN):
-            st.rerun()
+    c1, c2, c3, c4 = st.columns([1.5, 2, 2, .6], vertical_alignment="bottom")
+    periodo = c1.radio("Periodo", list(OPC_PERIODO), horizontal=True, key="f_periodo")
+    sel_prov = c2.multiselect("Provincia", sorted(base["provincia"].unique()), key="f_prov", placeholder="Todas")
+    sel_canal = c3.multiselect("Canal de entrega", sorted(base["canal"].unique()), key="f_canal", placeholder="Todos")
+    c4.button("Limpiar", on_click=reiniciar, **({"width": "stretch"} if "width" in inspect.signature(st.button).parameters else {"use_container_width": True}))
 
-d = df_base.copy()
-if sel_meses:
-    d = d[d["anio_mes"].isin(sel_meses)]
+meses = OPC_PERIODO[periodo]
+ctx0 = base
 if sel_prov:
-    d = d[d["provincia"].isin(sel_prov)]
+    ctx0 = ctx0[ctx0["provincia"].isin(sel_prov)]
 if sel_canal:
-    d = d[d["canal_entrega"].isin(sel_canal)]
-
-if d.empty:
-    st.warning("La combinación de filtros no devuelve pedidos.")
+    ctx0 = ctx0[ctx0["canal"].isin(sel_canal)]
+if ctx0[ctx0["mes"].isin(meses)].empty:
+    st.warning("Los filtros no devuelven pedidos. Pulsa **Limpiar** o amplía la selección.")
     st.stop()
 
-HAY_FILTRO = len(d) != len(df_base)
-M_ACT = calcular_metricas(d)
-M_NAC = calcular_metricas(df_base)
-
-st.caption(
-    f"Mostrando **{M_ACT['pedidos']:,}** de **{M_NAC['pedidos']:,}** pedidos ({M_ACT['pedidos']/M_NAC['pedidos']:.1%}) · "
-    f"SLA activo: Express ≤ {sla_express} min | Estándar urbano ≤ {sla_estandar} min | Programado ≤ {sla_programado} min."
-)
+n_sel = int(ctx0["mes"].isin(meses).sum())
+st.markdown(f"<div class='nota'>Mostrando {num(n_sel)} de {num(len(base))} pedidos · "
+            f"{'filtros activos' if (sel_prov or sel_canal or len(meses) < len(MESES_TODOS)) else 'vista consolidada'}</div>",
+            unsafe_allow_html=True)
 
 
-def render_kpi_card(col, titulo, valor_txt, sub_txt, sem_tuple, ayuda):
-    with col.container(border=True):
-        st.metric(label=titulo, value=valor_txt, delta=sub_txt, delta_color="off", help=ayuda)
-        txt_s, col_s, bg_s = sem_tuple
-        st.markdown(
-            f"<span class='semaforo-pill' style='color:{col_s};background:{bg_s};'>{txt_s}</span>",
-            unsafe_allow_html=True,
-        )
+def mes_previo(ms):
+    if len(ms) == 1:
+        i = MESES_TODOS.index(ms[0])
+        return [MESES_TODOS[i - 1]] if i > 0 else None
+    return None
 
 
-# ==========================================
-# 6. PESTAÑAS DE NAVEGACIÓN (4 NIVELES)
-# ==========================================
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🏛️ 1. Visión Ejecutiva",
-    "🗺️ 2. Diagnóstico Territorial y Comercial",
-    "🔧 3. Detalle Operativo y Motivos de Reclamo",
-    "📋 4. Ficha Técnica BI & Gobernanza",
-])
+# ---------------------------------------------------------------------------
+# Componentes reutilizables
+# ---------------------------------------------------------------------------
+def tarjeta(col, titulo, valor_txt, clave_kpi, valor, meta_txt, delta_html=""):
+    est = K.estado(clave_kpi, valor)
+    c = COLOR_ESTADO[est]
+    col.markdown(
+        f"<div class='kpi'><div class='kpi-t'>{titulo}</div><div class='kpi-v'>{valor_txt}</div>"
+        f"<div class='kpi-d'>{delta_html}</div>"
+        f"<div class='kpi-s'><span class='dot' style='background:{c}'></span><b style='color:{c}'>{TXT_ESTADO[est]}</b>"
+        f" · <span style='color:{GRIS}'>{meta_txt}</span></div></div>", unsafe_allow_html=True)
 
-# ------------------------------------------
-# NIVEL 1: VISIÓN EJECUTIVA
-# ------------------------------------------
-with tab1:
-    k1, k2, k3, k4, k5 = st.columns(5)
 
-    # Semáforos independientes y coherentes con los datos reales
-    sem_ticket = semaforo_kpi(M_ACT["ticket_medio_usd"], verde=M_NAC["ticket_medio_usd"] * 0.98, amarillo=M_NAC["ticket_medio_usd"] * 0.90)
-    sem_prod = semaforo_kpi(M_ACT["usd_por_km"], verde=M_NAC["usd_por_km"] * 0.98, amarillo=M_NAC["usd_por_km"] * 0.88)
-    sem_otd = semaforo_kpi(M_ACT["otd_pct"], verde=meta_otd_global, amarillo=meta_otd_global - 10.0)
-    sem_recl = semaforo_kpi(M_ACT["tasa_reclamos_x1000"], verde=umbral_reclamos, amarillo=50.0, menor_es_mejor=True)
-    sem_tiempo = semaforo_kpi(M_ACT["tiempo_entrega_p90"], verde=180.0, amarillo=220.0, menor_es_mejor=True)
+def delta(act, prev, dec=1, suf="", mejor="alto", pct=False):
+    if prev is None or pd.isna(prev) or pd.isna(act):
+        return ""
+    dif = (act / prev - 1) * 100 if pct else act - prev
+    bueno = (dif >= 0) if mejor == "alto" else (dif <= 0)
+    c = COLOR_ESTADO["verde"] if bueno else COLOR_ESTADO["rojo"]
+    flecha = "▲" if dif >= 0 else "▼"
+    return f"<span style='color:{c}'>{flecha} {num(abs(dif), dec)}{suf}</span> <span style='color:{GRIS}'>vs. mes anterior</span>"
 
-    render_kpi_card(
-        k1,
-        "1. Ventas Asociadas (US$)",
-        f"${M_ACT['ventas_usd']:,.0f}",
-        f"Ticket medio: ${M_ACT['ticket_medio_usd']:,.2f} / pedido",
-        sem_ticket,
-        "Suma de `ventas_asociadas_usd`. Limitación declarada: el CSV no desglosa devoluciones ni impuestos para separar venta bruta de neta.",
-    )
-    render_kpi_card(
-        k2,
-        "2. Productividad Logística",
-        f"${M_ACT['usd_por_km']:,.2f} / km",
-        f"Ritmo: {M_ACT['min_por_km']:,.1f} min/km recorridos",
-        sem_prod,
-        "Sustituye al Margen Bruto (no disponible en el dataset) midiendo el ingreso generado por cada kilómetro recorrido (`Σ ventas_asociadas_usd / Σ distancia_km`).",
-    )
-    render_kpi_card(
-        k3,
-        f"3. Entrega a Tiempo (Meta ≥ {meta_otd_global}%)",
-        f"{M_ACT['otd_pct']:.1f}%",
-        f"{M_ACT['otd_pct'] - M_NAC['otd_pct']:+.1f} pp vs. nacional" if HAY_FILTRO else f"SLA por canal activo",
-        sem_otd,
-        "Porcentaje de pedidos donde `tiempo_individual_entrega_min <= SLA_canal`. Se actualiza dinámicamente con la meta lateral.",
-    )
-    render_kpi_card(
-        k4,
-        "4. Reclamos / 1.000 pedidos",
-        f"{M_ACT['tasa_reclamos_x1000']:.1f}",
-        f"Eventos: n = {M_ACT['reclamos_n']} de {M_ACT['pedidos']:,}" + (" ⚠️ Muestra baja" if M_ACT["muestra_pequena"] else ""),
-        sem_recl,
-        f"Tasa relativizada `(Σ reclamos_registrados / Total pedidos) * 1.000`. Umbral verde ≤ {umbral_reclamos:.1f}.",
-    )
-    render_kpi_card(
-        k5,
-        "5. Tiempo Entrega (Mediana / P90)",
-        f"{M_ACT['tiempo_entrega_mediana']:.0f} min (P90: {M_ACT['tiempo_entrega_p90']:.0f})",
-        f"Media: {M_ACT['tiempo_entrega_media']:.1f} min · Atención: {M_ACT['tiempo_atencion_media']:.1f} min",
-        sem_tiempo,
-        "Mediana y Percentil 90 de `tiempo_individual_entrega_min`. Evita ocultar las colas largas (hasta 520 min) detrás del promedio.",
-    )
 
-    if M_ACT["muestra_pequena"]:
-        st.warning(
-            f"⚠️ **Advertencia de estabilidad estadística (Gobernanza):** La selección actual contiene solo **n = {M_ACT['reclamos_n']} reclamos** "
-            f"en **{M_ACT['pedidos']:,} pedidos**. Las tasas calculadas con menos de {MIN_EVENTOS_ESTABLE} eventos (como ocurre en Tungurahua con n=8 o Azuay con n=13) "
-            "tienen alta varianza muestral y no deben usarse aisladamente para decisiones punitivas."
-        )
+def tabla_semaforo(r, idx_col):
+    """Tabla de KPIs por territorio con celdas coloreadas según el umbral de la ficha."""
+    sem = K.semaforo_por(r)
+    vis = pd.DataFrame({
+        idx_col.capitalize(): r[idx_col],
+        "Cumplimiento meta": [num(v, 1, suf=" %") for v in r["cumplimiento"]],
+        "Reclamos/1.000": [num(v, 1) + (" ⚠" if n < K.MIN_EVENTOS else "") for v, n in zip(r["reclamos"], r["reclamos_n"])],
+        "Entrega a tiempo": [num(v, 1, suf=" %") for v in r["otd"]],
+        "P90 entrega (min)": [num(v, 0) for v in r["p90"]],
+        "USD por km": [num(v, 2) for v in r["prod"]],
+    })
+    mapa = dict(zip(vis.columns[1:], K.KPIS))
 
-    # Síntesis ejecutiva automática basada en los datos reales
-    df_prov_exec = resumen_agrupado(d, "provincia")
-    if len(df_prov_exec) > 1:
-        p_max_recl_abs = df_prov_exec.loc[df_prov_exec["reclamos_n"].idxmax()]
-        p_max_recl_tasa = df_prov_exec.loc[df_prov_exec["tasa_reclamos_x1000"].idxmax()]
-        p_lenta = df_prov_exec.loc[df_prov_exec["tiempo_entrega_media"].idxmax()]
-        st.info(
-            f"📌 **Hallazgo clave del caso (Conteo vs. Tasa):** **{p_max_recl_abs['provincia']}** registra el mayor volumen absoluto de reclamos "
-            f"(**n = {int(p_max_recl_abs['reclamos_n'])}**), pero al relativizar por cada 1.000 pedidos el foco crítico real es "
-            f"**{p_max_recl_tasa['provincia']}** (**{p_max_recl_tasa['tasa_reclamos_x1000']:.1f} / 1.000**, n = {int(p_max_recl_tasa['reclamos_n'])}). "
-            f"Además, las plazas con mayores tiempos medios de entrega —lideradas por **{p_lenta['provincia']}** ({p_lenta['tiempo_entrega_media']:.0f} min)— "
-            "son exactamente las que concentran las mayores tasas de reclamo."
-        )
+    def css(_):
+        out = pd.DataFrame("", index=vis.index, columns=vis.columns)
+        for colv, kk in mapa.items():
+            out[colv] = [f"background-color:{FONDO_ESTADO[e]};color:#1F2A37" for e in sem[kk]]
+        return out
 
-    c1, c2 = st.columns(2)
-    with c1:
-        with st.container(border=True):
-            st.subheader("Tasa de reclamos por 1.000 pedidos vs. Conteo absoluto (n)")
-            df_r = df_prov_exec.sort_values("tasa_reclamos_x1000", ascending=True).copy()
-            df_r["etiqueta"] = df_r.apply(
-                lambda r: f"{r['tasa_reclamos_x1000']:.1f} (n={int(r['reclamos_n'])}{' *' if r['muestra_pequena'] else ''})",
-                axis=1,
-            )
-            fig_r = px.bar(
-                df_r, x="tasa_reclamos_x1000", y="provincia", orientation="h",
-                text="etiqueta", color="tasa_reclamos_x1000",
-                color_continuous_scale=["#16a34a", "#eab308", "#dc2626"],
-                range_color=[0, 70],
-            )
-            fig_r.add_vline(x=umbral_reclamos, line_dash="dash", line_color="#15803d", annotation_text=f"Meta ≤ {umbral_reclamos:.0f}")
-            fig_r.add_vline(x=50, line_dash="dot", line_color="#dc2626", annotation_text="Crítico > 50")
-            fig_r.update_layout(
-                height=350, margin=dict(l=10, r=20, t=20, b=10),
-                coloraxis_showscale=False, yaxis_title=None,
-                xaxis_title="Reclamos por cada 1.000 pedidos (entre paréntesis: eventos absolutos n)",
-            )
-            st.plotly_chart(fig_r, **AN_PLOT)
-            st.caption("(*) Provincias con n < 15 eventos absolutos: tasa sujeta a alta sensibilidad muestral.")
+    st.dataframe(vis.style.apply(css, axis=None), hide_index=True, **AN_DF)
 
-    with c2:
-        with st.container(border=True):
-            st.subheader("Tiempo medio de entrega (min) y % Entrega a Tiempo (OTD)")
-            df_t = df_prov_exec.sort_values("tiempo_entrega_media", ascending=True).copy()
-            df_t["etiqueta_t"] = df_t.apply(
-                lambda r: f"{r['tiempo_entrega_media']:.0f} min (OTD: {r['otd_pct']:.1f}%)",
-                axis=1,
-            )
-            fig_t = px.bar(
-                df_t, x="tiempo_entrega_media", y="provincia", orientation="h",
-                text="etiqueta_t", color="otd_pct",
-                color_continuous_scale="RdYlGn", range_color=[50, 100],
-            )
-            fig_t.update_layout(
-                height=350, margin=dict(l=10, r=20, t=20, b=10),
-                coloraxis_colorbar=dict(title="OTD %"),
-                yaxis_title=None, xaxis_title="Tiempo individual medio de entrega (minutos)",
-            )
-            st.plotly_chart(fig_t, **AN_PLOT)
-            st.caption("El color refleja el % de cumplimiento OTD según el SLA específico de cada canal; la barra mide los minutos promedio.")
 
-    c3, c4 = st.columns([1.15, 1])
-    with c3:
-        with st.container(border=True):
-            st.subheader("Evolución mensual de Ventas Asociadas vs. Referencia Ene–Feb")
-            st.caption(
-                "**Nota metodológica:** El archivo no contiene cuota presupuestaria (`Meta_Venta`). "
-                "La línea punteada muestra el promedio mensual Ene–Feb como referencia interna comparativa, no como cuota oficial."
-            )
-            m_mes = resumen_agrupado(d, "anio_mes").sort_values("anio_mes")
-            ref_ene_feb = m_mes[m_mes["anio_mes"].isin(["2025-01", "2025-02"])]["ventas_usd"].mean()
-            fig_m = go.Figure()
-            fig_m.add_trace(go.Bar(
-                x=m_mes["anio_mes"], y=m_mes["ventas_usd"],
-                text=[f"${v:,.0f}<br>({p:,} ped.)" for v, p in zip(m_mes["ventas_usd"], m_mes["pedidos"])],
-                textposition="auto", name="Ventas asociadas (US$)", marker_color="#2563eb",
-            ))
-            if pd.notna(ref_ene_feb):
-                fig_m.add_hline(
-                    y=ref_ene_feb, line_dash="dash", line_color="#d97706",
-                    annotation_text=f"Ref. media Ene-Feb: ${ref_ene_feb:,.0f}",
-                )
-            fig_m.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10), yaxis_title="Ventas asociadas (US$)", xaxis_title="Mes")
-            st.plotly_chart(fig_m, **AN_PLOT)
+# ---------------------------------------------------------------------------
+# 1. VISIÓN EJECUTIVA
+# ---------------------------------------------------------------------------
+def pagina_ejecutiva():
+    k = K.calcular_kpis(ctx0, meses)
+    pm = mes_previo(meses)
+    kp = K.calcular_kpis(ctx0, pm) if pm else None
+    g = (lambda x: kp[x]) if kp else (lambda x: None)
 
-    with c4:
-        with st.container(border=True):
-            st.subheader("Ventas asociadas y Productividad (US$/km) por Provincia")
-            df_v = df_prov_exec.sort_values("ventas_usd", ascending=True).copy()
-            df_v["txt_v"] = df_v.apply(lambda r: f"${r['ventas_usd']:,.0f} (${r['usd_por_km']:.2f}/km)", axis=1)
-            fig_v = px.bar(
-                df_v, x="ventas_usd", y="provincia", orientation="h",
-                text="txt_v", color="usd_por_km", color_continuous_scale="Blues",
-            )
-            fig_v.update_layout(
-                height=345, margin=dict(l=10, r=20, t=20, b=10),
-                coloraxis_colorbar=dict(title="US$/km"), yaxis_title=None, xaxis_title="Ventas asociadas (US$)",
-            )
-            st.plotly_chart(fig_v, **AN_PLOT)
+    cols = st.columns(5)
+    cumpl_txt = ("Meta ≥ 100 % de la referencia" if pd.notna(k["cumplimiento"])
+                 else "Mes base: sin meta de referencia")
+    tarjeta(cols[0], "Ventas · cumplimiento", num(k["ventas"], 0, "$"), "cumplimiento", k["cumplimiento"],
+            f"Cumplimiento {num(k['cumplimiento'], 1, suf=' %')}" if pd.notna(k["cumplimiento"]) else cumpl_txt,
+            delta(k["ventas_dia"], g("ventas_dia"), 1, " % ventas/día", pct=True) if kp else "")
+    tarjeta(cols[1], "Reclamos / 1.000 pedidos", num(k["reclamos"], 1), "reclamos", k["reclamos"], "Meta ≤ 25",
+            delta(k["reclamos"], g("reclamos"), 1, "", mejor="bajo") if kp else "")
+    tarjeta(cols[2], "Entrega a tiempo", num(k["otd"], 1, suf=" %"), "otd", k["otd"], "Meta ≥ 90 %",
+            delta(k["otd"], g("otd"), 1, " pp") if kp else "")
+    tarjeta(cols[3], "Tiempo de entrega P90", num(k["p90"], 0, suf=" min"), "p90", k["p90"], "Meta ≤ 180 min",
+            delta(k["p90"], g("p90"), 0, " min", mejor="bajo") if kp else "")
+    tarjeta(cols[4], "Productividad logística", num(k["prod"], 2, suf=" USD/km"), "prod", k["prod"], "Meta ≥ 2,50",
+            delta(k["prod"], g("prod"), 2, "") if kp else "")
 
-    st.download_button(
-        "📥 Descargar tabla resumen ejecutiva por provincia (CSV)",
-        data=df_prov_exec.to_csv(index=False).encode("utf-8-sig"),
-        file_name="resumen_ejecutivo_provincial_logiandes.csv",
-        mime="text/csv",
-    )
+    r = K.resumen_por(ctx0, meses, "provincia")
+    sem = K.semaforo_por(r)
+    rojas = r.loc[(sem == "rojo").any(axis=1), "provincia"].tolist()
+    if len(r) > 1:
+        msg = (f"**{len(rojas)} de {len(r)} provincias** tienen al menos un indicador en rojo: {', '.join(rojas)}."
+               if rojas else "Ninguna provincia tiene indicadores en rojo en la selección actual.")
+        st.markdown(f"<div style='margin:.9rem 0 .1rem'>{msg}</div>", unsafe_allow_html=True)
 
-# ------------------------------------------
-# NIVEL 2: DIAGNÓSTICO TERRITORIAL Y COMERCIAL
-# ------------------------------------------
-with tab2:
-    with st.container(border=True):
-        tc1, tc2 = st.columns([1.6, 1.4])
-        with tc1:
-            seg_disp = sorted(d["tipo_cliente"].dropna().unique())
-            sel_seg = st.multiselect(
-                "🏢 Filtro de Nivel 2 · Segmento de Cliente (`tipo_cliente`)",
-                seg_disp, default=[], placeholder="Todos los segmentos (Comercio minorista, PyME, Corporativo)",
-            )
-        with tc2:
-            reg_disp = sorted(d["region"].dropna().unique())
-            sel_reg = st.multiselect(
-                "🗺️ Filtro de Nivel 2 · Región natural (`region`)",
-                reg_disp, default=[], placeholder="Todas las regiones",
-            )
+    a, b = st.columns([1.15, 1])
+    with a:
+        seccion("Semáforo por provincia", "Color según los umbrales de la ficha técnica. ⚠ = menos de 20 reclamos (tasa poco estable).")
+        tabla_semaforo(r, "provincia")
+    with b:
+        seccion("Ventas vs. meta de referencia por mes", "La serie mensual no depende del filtro de periodo; sí de provincia y canal.")
+        m = K.resumen_mensual(ctx0)
+        fig = go.Figure()
+        fig.add_bar(x=[K.nombre_mes(x) for x in m["mes"]], y=m["ventas"], name="Ventas", marker_color=AZUL,
+                    text=[num(v, 0, "$") for v in m["ventas"]], textposition="outside")
+        fig.add_scatter(x=[K.nombre_mes(x) for x in m["mes"]], y=m["meta"], name="Meta de referencia", mode="lines+markers",
+                        line=dict(color="#B7791F", dash="dash"), connectgaps=False)
+        fig.update_yaxes(title="USD", rangemode="tozero")
+        fig.update_layout(legend=dict(orientation="h", y=1.12, x=0))
+        grafico(fig, "ej_serie", 320)
 
-    d_terr = d.copy()
-    if sel_seg:
-        d_terr = d_terr[d_terr["tipo_cliente"].isin(sel_seg)]
-    if sel_reg:
-        d_terr = d_terr[d_terr["region"].isin(sel_reg)]
-
-    if d_terr.empty:
-        st.warning("No hay registros para el segmento o región seleccionados.")
+    seccion("Acciones sugeridas", "Prioridad alta = indicador en rojo; media = en seguimiento. Derivadas automáticamente de los umbrales.")
+    filas = []
+    for i, fila in r.iterrows():
+        for kk in K.KPIS:
+            e = sem.loc[i, kk]
+            if e in ("rojo", "amarillo"):
+                u = K.KPIS[kk]
+                extra = " (muestra baja: confirmar con más datos)" if kk == "reclamos" and fila["reclamos_n"] < K.MIN_EVENTOS else ""
+                filas.append({"Prioridad": "Alta" if e == "rojo" else "Media", "Provincia": fila["provincia"],
+                              "Indicador": u["nombre"], "Valor": num(fila[kk], u["dec"], suf=u["unidad"]),
+                              "Meta": num(u["verde"], u["dec"], suf=u["unidad"]), "Acción sugerida": K.ACCIONES[kk] + extra})
+    if filas:
+        acc = pd.DataFrame(filas)
+        acc["_o"] = acc["Prioridad"].map({"Alta": 0, "Media": 1})
+        st.dataframe(acc.sort_values(["_o", "Provincia"]).drop(columns="_o"), hide_index=True, height=300, **AN_DF)
     else:
-        g1, g2 = st.columns([1.15, 1])
-        with g1:
-            with st.container(border=True):
-                st.subheader("🎯 Tiempo Medio de Entrega vs. Tasa de Reclamos por Provincia")
-                df_sc = resumen_agrupado(d_terr, "provincia")
-                fig_sc = px.scatter(
-                    df_sc,
-                    x="tiempo_entrega_media",
-                    y="tasa_reclamos_x1000",
-                    size="pedidos",
-                    color="otd_pct",
-                    text="provincia",
-                    color_continuous_scale="RdYlGn",
-                    range_color=[50, 100],
-                    size_max=48,
-                    hover_data={
-                        "pedidos": ":,",
-                        "reclamos_n": True,
-                        "ventas_usd": ":$,.0f",
-                        "tiempo_entrega_p90": ":.0f",
-                    },
-                )
-                fig_sc.add_hline(y=umbral_reclamos, line_dash="dash", line_color="#15803d", annotation_text="Umbral 25/1.000")
-                fig_sc.update_traces(textposition="top center")
-                fig_sc.update_layout(
-                    height=390, margin=dict(l=10, r=10, t=25, b=10),
-                    xaxis_title="Tiempo individual medio de entrega (minutos)",
-                    yaxis_title="Tasa de reclamos por 1.000 pedidos",
-                    coloraxis_colorbar=dict(title="OTD %"),
-                )
-                st.plotly_chart(fig_sc, **AN_PLOT)
-                st.caption(
-                    "**Evidencia empírica:** Loja (170 min) y Manabí (162 min) se ubican en el cuadrante superior derecho "
-                    "(mayor demora y mayor tasa de reclamos), mientras Tungurahua (109 min), Azuay (112 min) y Pichincha (123 min) "
-                    "mantienen tiempos bajos y tasas controladas (< 20 por 1.000)."
-                )
+        st.success("Sin acciones pendientes en la selección actual.")
+    st.caption("Límite interpretativo: estas lecturas describen asociaciones en los registros internos. Cualquier contraste con "
+               "indicadores del BCE o del INEC mostraría coincidencia temporal, no causalidad.")
 
-        with g2:
-            with st.container(border=True):
-                st.subheader("🏢 Desempeño por Segmento (`tipo_cliente`) y Canal")
-                piv_seg = (
-                    d_terr.groupby(["provincia", "tipo_cliente"], as_index=False)
-                    .agg(
-                        pedidos=("pedido_id", "count"),
-                        ventas_usd=("ventas_asociadas_usd", "sum"),
-                        reclamos_n=("reclamos_registrados", "sum"),
-                    )
-                )
-                piv_seg["tasa_x1000"] = piv_seg["reclamos_n"] / piv_seg["pedidos"] * 1000
-                fig_seg = px.bar(
-                    piv_seg, x="provincia", y="ventas_usd", color="tipo_cliente",
-                    barmode="stack", text_auto=".2s",
-                    hover_data={"pedidos": ":,", "reclamos_n": True, "tasa_x1000": ":.1f"},
-                )
-                fig_seg.update_layout(
-                    height=390, margin=dict(l=10, r=10, t=25, b=10),
-                    xaxis_title=None, yaxis_title="Ventas asociadas (US$)", legend_title_text="Tipo de cliente",
-                )
-                st.plotly_chart(fig_seg, **AN_PLOT)
-                st.caption("`tipo_cliente` es una variable de segmentación B2B (Comercio minorista, PyME, Corporativo), no un dato personal.")
 
-        with st.container(border=True):
-            st.subheader("📋 Tabla Comparativa Territorial Completa (con conteo de eventos y productividad)")
-            tabla_prov = resumen_agrupado(d_terr, "provincia").sort_values("ventas_usd", ascending=False)
-            st.dataframe(
-                tabla_prov,
-                hide_index=True,
-                **AN_DF,
-                column_config={
-                    "provincia": "Provincia",
-                    "pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
-                    "ventas_usd": st.column_config.NumberColumn("Ventas Asociadas (US$)", format="$ %.0f"),
-                    "ticket_medio_usd": st.column_config.NumberColumn("Venta / Pedido", format="$ %.2f"),
-                    "usd_por_km": st.column_config.NumberColumn("Productividad (US$/km)", format="$ %.2f"),
-                    "reclamos_n": st.column_config.NumberColumn("Reclamos (n)", format="%d"),
-                    "tasa_reclamos_x1000": st.column_config.NumberColumn("Tasa / 1.000", format="%.1f"),
-                    "otd_pct": st.column_config.ProgressColumn("OTD (%)", min_value=0, max_value=100, format="%.1f%%"),
-                    "tiempo_entrega_media": st.column_config.NumberColumn("Media Entrega (min)", format="%.1f"),
-                    "tiempo_entrega_mediana": st.column_config.NumberColumn("Mediana (min)", format="%.0f"),
-                    "tiempo_entrega_p90": st.column_config.NumberColumn("P90 Entrega (min)", format="%.0f"),
-                    "tiempo_atencion_media": st.column_config.NumberColumn("Media Atención (min)", format="%.1f"),
-                    "muestra_pequena": st.column_config.CheckboxColumn("Alerta n<15"),
-                },
-            )
-
-# ------------------------------------------
-# NIVEL 3: DETALLE OPERATIVO Y MOTIVOS DE RECLAMO
-# ------------------------------------------
-with tab3:
+# ---------------------------------------------------------------------------
+# 2. DIAGNÓSTICO TERRITORIAL
+# ---------------------------------------------------------------------------
+def pagina_territorial():
     with st.container(border=True):
-        co1, co2, co3 = st.columns([1.5, 1.5, 1.3], vertical_alignment="bottom")
-        with co1:
-            filtro_op = st.selectbox(
-                "🔎 Filtro de incidencias operativas",
-                ["Todos los pedidos", "Solo pedidos con reclamo (n=187 nacional)", "Solo entregas fuera de SLA (OTD = 0)"],
-            )
-        with co2:
-            motivos_disp = sorted(d["motivo_reclamo"].dropna().unique())
-            sel_motivo = st.multiselect(
-                "📣 Filtrar por `motivo_reclamo`",
-                motivos_disp, default=[], placeholder="Todos los motivos registrados",
-            )
-        with co3:
-            mostrar_pedido_id = st.toggle(
-                "🔓 Mostrar `pedido_id` individual (Modo Auditoría)",
-                value=False,
-                help="El dataset no contiene nombres ni cédulas. El único identificador individual trazable es `pedido_id`, que se oculta en la vista estándar.",
-            )
+        t1, t2 = st.columns([1.2, 2])
+        sel_reg = t1.multiselect("Región", sorted(base["region"].unique()), key="f_region", placeholder="Todas")
+        opciones = ["Pedidos vs. reclamos", "Tiempo de entrega vs. reclamos"]
+        if hasattr(st, "segmented_control"):
+            relacion = t2.segmented_control("Relación a explorar", opciones, default=opciones[0], key="f_relacion") or opciones[0]
+        else:
+            relacion = t2.radio("Relación a explorar", opciones, horizontal=True, key="f_relacion")
+    ctx = ctx0[ctx0["region"].isin(sel_reg)] if sel_reg else ctx0
+    d = ctx[ctx["mes"].isin(meses)]
+    if d.empty:
+        st.warning("Sin pedidos para la región seleccionada.")
+        return
+    r = K.resumen_por(ctx, meses, "provincia")
 
-    d_op = d.copy()
-    if filtro_op.startswith("Solo pedidos con reclamo"):
-        d_op = d_op[d_op["reclamos_registrados"] == 1]
-    elif filtro_op.startswith("Solo entregas fuera de SLA"):
-        d_op = d_op[d_op["entrega_a_tiempo"] == 0]
-    if sel_motivo:
-        d_op = d_op[d_op["motivo_reclamo"].isin(sel_motivo)]
+    a, b = st.columns(2)
+    with a:
+        seccion("Ventas por provincia (USD)")
+        t = r.sort_values("ventas")
+        fig = go.Figure(go.Bar(x=t["ventas"], y=t["provincia"], orientation="h", marker_color=AZUL,
+                               text=[num(v, 0, "$") for v in t["ventas"]], textposition="outside", cliponaxis=False))
+        fig.update_xaxes(title="USD", rangemode="tozero")
+        grafico(fig, "te_ventas")
+    with b:
+        seccion("Reclamos por 1.000 pedidos, con intervalo de confianza 95 %",
+                "Las barras de error muestran la incertidumbre: con pocos eventos la tasa es inestable.")
+        t = r.sort_values("reclamos")
+        fig = go.Figure(go.Bar(
+            x=t["reclamos"], y=t["provincia"], orientation="h",
+            marker_color=[COLOR_ESTADO[K.estado("reclamos", v)] for v in t["reclamos"]],
+            error_x=dict(type="data", symmetric=False, array=t["ic_sup"] - t["reclamos"], arrayminus=t["reclamos"] - t["ic_inf"],
+                         color="#475569", thickness=1.2),
+            text=[num(v, 1) for v in t["reclamos"]], textposition="inside", insidetextanchor="start",
+            textfont=dict(color="white")))
+        fig.add_vline(x=25, line_dash="dash", line_color=COLOR_ESTADO["verde"], annotation_text="Meta 25")
+        fig.add_vline(x=50, line_dash="dash", line_color=COLOR_ESTADO["rojo"], annotation_text="Rojo 50")
+        fig.update_xaxes(title="Reclamos por 1.000 pedidos", rangemode="tozero")
+        grafico(fig, "te_reclamos")
 
-    o1, o2 = st.columns(2)
-    with o1:
-        with st.container(border=True):
-            st.subheader("📦 Dispersión de Tiempos de Entrega (minutos) por Provincia")
-            fig_box_p = px.box(
-                d, x="provincia", y="tiempo_individual_entrega_min", color="provincia", points="outliers",
-                category_orders={"provincia": ["Loja", "Manabí", "Guayas", "Pichincha", "Azuay", "Tungurahua"]},
-            )
-            fig_box_p.update_layout(
-                height=360, margin=dict(l=10, r=10, t=20, b=10), showlegend=False,
-                xaxis_title=None, yaxis_title="Tiempo individual de entrega (minutos)",
-            )
-            st.plotly_chart(fig_box_p, **AN_PLOT)
-            st.caption(
-                "El máximo alcanza **520 minutos** frente a una media nacional de **132 minutos**. "
-                "Los diagramas de caja exponen las colas largas y valores atípicos que el promedio oculta."
-            )
+    c, e = st.columns(2)
+    with c:
+        seccion("Entrega a tiempo por provincia y canal (%)", "Escala fija ligada a los umbrales: rojo < 80, ámbar 80–90, verde ≥ 90.")
+        piv = d.pivot_table(index="provincia", columns="canal", values="a_tiempo", aggfunc="mean") * 100
+        npv = d.pivot_table(index="provincia", columns="canal", values="a_tiempo", aggfunc="size")
+        fig = go.Figure(go.Heatmap(
+            z=piv.values, x=piv.columns, y=piv.index, zmin=60, zmax=100, customdata=npv.values,
+            text=[[num(v, 0, suf="%") for v in fila] for fila in piv.values], texttemplate="%{text}",
+            textfont=dict(color="white", size=13), xgap=3, ygap=3, showscale=False,
+            colorscale=[[0, COLOR_ESTADO["rojo"]], [.5, COLOR_ESTADO["rojo"]], [.5, COLOR_ESTADO["amarillo"]],
+                        [.75, COLOR_ESTADO["amarillo"]], [.75, COLOR_ESTADO["verde"]], [1, COLOR_ESTADO["verde"]]],
+            hovertemplate="%{y} · %{x}<br>OTD: %{z:.1f}%<br>Pedidos: %{customdata}<extra></extra>"))
+        fig.update_yaxes(autorange="reversed")
+        grafico(fig, "te_heat")
+    with e:
+        if relacion == "Pedidos vs. reclamos":
+            seccion("Pedidos vs. reclamos por provincia y mes", "Cada punto es una provincia en un mes (continuidad con la clase anterior).")
+            pm_ = d.groupby(["provincia", "mes"]).agg(pedidos=("pedido_id", "size"), rec=("reclamos", "sum")).reset_index()
+            pm_["tasa"] = pm_["rec"] / pm_["pedidos"] * 1000
+            fig = px.scatter(pm_, x="pedidos", y="tasa", color="provincia", color_discrete_sequence=px.colors.qualitative.Safe,
+                             hover_data={"mes": True})
+            fig.update_traces(marker=dict(size=11, line=dict(width=1, color="white")))
+            fig.update_layout(xaxis_title="Pedidos en el mes", yaxis_title="Reclamos por 1.000 pedidos")
+            grafico(fig, "te_sc1")
+            if len(pm_) >= 5:
+                rho = pm_[["pedidos", "tasa"]].corr(method="spearman").iloc[0, 1]
+                st.caption(f"Correlación de Spearman = {num(rho, 2)} con n = {len(pm_)} puntos. Una asociación débil o inestable "
+                           "con tan pocos puntos no permite concluir que el volumen cause más o menos reclamos.")
+        else:
+            seccion("Tiempo medio de entrega vs. reclamos por provincia", "Tamaño del punto = pedidos.")
+            fig = px.scatter(r, x="t_medio", y="reclamos", size="pedidos", text="provincia", size_max=38)
+            fig.update_traces(marker=dict(color=AZUL, opacity=.8, line=dict(width=1, color="white")), textposition="top center")
+            fig.update_layout(xaxis_title="Tiempo medio de entrega (min)", yaxis_title="Reclamos por 1.000 pedidos")
+            grafico(fig, "te_sc2")
+            if len(r) >= 5:
+                rho = r[["t_medio", "reclamos"]].corr(method="spearman").iloc[0, 1]
+                st.caption(f"Correlación de Spearman = {num(rho, 2)} con n = {len(r)} provincias. Con solo {len(r)} observaciones "
+                           "es una pista para investigar, no una prueba de causalidad.")
 
-    with o2:
-        with st.container(border=True):
-            st.subheader("🚚 Tiempos de Entrega (minutos) por Canal vs. Promesa SLA")
-            fig_box_c = px.box(
-                d, x="canal_entrega", y="tiempo_individual_entrega_min", color="canal_entrega", points="outliers",
-                category_orders={"canal_entrega": ["Express", "Estándar urbano", "Programado"]},
-            )
-            for canal_k, valor_sla in sla_activo.items():
-                fig_box_c.add_hline(
-                    y=valor_sla, line_dash="dot",
-                    annotation_text=f"SLA {canal_k}: {valor_sla} min",
-                    annotation_position="top right",
-                )
-            fig_box_c.update_layout(
-                height=360, margin=dict(l=10, r=10, t=20, b=10), showlegend=False,
-                xaxis_title=None, yaxis_title="Tiempo individual de entrega (minutos)",
-            )
-            st.plotly_chart(fig_box_c, **AN_PLOT)
-            st.caption(
-                "**Prevención de sesgo por canal:** Las medianas reales son **87 min (Express)**, **134 min (Estándar urbano)** "
-                "y **157 min (Programado)**. Evaluarlos con un SLA único sesgaría artificialmente al canal Programado."
-            )
+    seccion("Tabla comparativa por provincia")
+    t = r.copy()
+    t["confianza"] = np.where(t["reclamos_n"] < K.MIN_EVENTOS, "Baja (<20 reclamos)", "Aceptable")
+    t = t.sort_values("ventas", ascending=False)[["provincia", "pedidos", "ventas", "ticket", "cumplimiento", "reclamos_n",
+                                                    "reclamos", "ic_inf", "ic_sup", "confianza", "otd", "p90", "prod"]]
+    st.dataframe(t, hide_index=True, **AN_DF, column_config={
+        "provincia": "Provincia", "pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
+        "ventas": st.column_config.NumberColumn("Ventas (USD)", format="$ %.0f"),
+        "ticket": st.column_config.NumberColumn("Ticket (USD)", format="$ %.2f"),
+        "cumplimiento": st.column_config.NumberColumn("Cumplimiento meta (%)", format="%.1f"),
+        "reclamos_n": st.column_config.NumberColumn("Reclamos (n)", format="%d"),
+        "reclamos": st.column_config.NumberColumn("Reclamos/1.000", format="%.1f"),
+        "ic_inf": st.column_config.NumberColumn("IC 95 % inf.", format="%.1f"),
+        "ic_sup": st.column_config.NumberColumn("IC 95 % sup.", format="%.1f"),
+        "confianza": "Confianza de la tasa",
+        "otd": st.column_config.NumberColumn("OTD (%)", format="%.1f"),
+        "p90": st.column_config.NumberColumn("P90 (min)", format="%.0f"),
+        "prod": st.column_config.NumberColumn("USD/km", format="%.2f"),
+    })
 
-    # Análisis profundo de motivo_reclamo y tiempo_atencion_min (Variables clave señaladas por el experto)
-    m1, m2 = st.columns([1.15, 1])
-    with m1:
-        with st.container(border=True):
-            st.subheader("📣 Desglose de `motivo_reclamo`: Operaciones vs. Comunicación/Atención")
-            recl_df = d[d["reclamos_registrados"] == 1].copy()
-            if recl_df.empty:
-                st.info("No hay reclamos registrados en la selección actual.")
-            else:
-                recl_df["naturaleza"] = np.where(
-                    recl_df["motivo_reclamo"].isin(MOTIVOS_OPERATIVOS),
-                    "1. Falla Operativa / Ruta",
-                    "2. Falla de Comunicación / Atención",
-                )
-                conteo_mot = (
-                    recl_df.groupby(["motivo_reclamo", "naturaleza"], as_index=False)
-                    .agg(casos=("pedido_id", "count"), atencion_media=("tiempo_atencion_min", "mean"))
-                    .sort_values("casos", ascending=True)
-                )
-                conteo_mot["pct"] = conteo_mot["casos"] / conteo_mot["casos"].sum() * 100
-                conteo_mot["etiqueta"] = conteo_mot.apply(
-                    lambda r: f"{int(r['casos'])} casos ({r['pct']:.1f}%) · Atención: {r['atencion_media']:.1f} min",
-                    axis=1,
-                )
-                fig_mot = px.bar(
-                    conteo_mot, x="casos", y="motivo_reclamo", color="naturaleza", orientation="h",
-                    text="etiqueta", color_discrete_map={
-                        "1. Falla Operativa / Ruta": "#dc2626",
-                        "2. Falla de Comunicación / Atención": "#2563eb",
-                    },
-                )
-                fig_mot.update_layout(
-                    height=340, margin=dict(l=10, r=20, t=20, b=10),
-                    xaxis_title="Número de reclamos registrados (casos)", yaxis_title=None,
-                    legend_title_text="Responsabilidad primaria",
-                )
-                st.plotly_chart(fig_mot, **AN_PLOT)
-                st.caption(
-                    "**Hallazgo accionable:** De los 187 reclamos nacionales, **119 casos (63,6%)** corresponden a ejecución física "
-                    "(*Demora en entrega*: 69, *Paquete con incidencia*: 29, *Incumplimiento de horario*: 21) y **68 casos (36,4%)** "
-                    "a gestión informativa y soporte (*Falta de actualización*: 52, *Demora en atención*: 16)."
-                )
 
-    with m2:
-        with st.container(border=True):
-            st.subheader("🔥 Matriz Provincia × Motivo de Reclamo (Conteo de casos)")
-            if recl_df.empty:
-                st.info("Sin casos para construir la matriz.")
-            else:
-                piv_mot = pd.crosstab(recl_df["provincia"], recl_df["motivo_reclamo"])
-                fig_hm = px.imshow(piv_mot, text_auto=True, aspect="auto", color_continuous_scale="Reds")
-                fig_hm.update_layout(
-                    height=340, margin=dict(l=10, r=10, t=20, b=10),
-                    xaxis_title=None, yaxis_title=None, coloraxis_showscale=False,
-                )
-                st.plotly_chart(fig_hm, **AN_PLOT)
-                st.caption("Permite focalizar si una provincia requiere intervención en ruteo físico o en notificaciones proactivas al cliente.")
+# ---------------------------------------------------------------------------
+# 3. DETALLE OPERATIVO
+# ---------------------------------------------------------------------------
+def acceso_analista() -> bool:
+    try:
+        codigo = st.secrets.get("ACCESS_CODE", "analista2026")
+    except Exception:  # noqa: BLE001
+        codigo = "analista2026"
+    return st.text_input("Código de acceso (analistas)", type="password", key="f_codigo",
+                         help="Control de acceso de demostración. En producción se reemplazaría por autenticación corporativa.") == codigo
 
+
+def pagina_operativa():
     with st.container(border=True):
-        st.subheader("🔎 Consulta Granular Gobernada de Pedidos")
-        vista_op = d_op.copy()
-        if not mostrar_pedido_id and "pedido_id" in vista_op.columns:
-            vista_op = vista_op.drop(columns=["pedido_id"])
-            st.caption(
-                "🔒 **Gobernanza aplicada sobre columnas reales:** El dataset no incluye nombres personales ni cédulas; "
-                "se oculta `pedido_id` por defecto en la vista estándar para priorizar el análisis agregado sobre el rastreo individual."
-            )
-        st.dataframe(vista_op, height=320, hide_index=True, **AN_DF)
-        st.download_button(
-            "📥 Descargar registros operativos filtrados (CSV)",
-            data=vista_op.to_csv(index=False).encode("utf-8-sig"),
-            file_name="detalle_operativo_logiandes.csv",
-            mime="text/csv",
-        )
+        o1, o2 = st.columns([1.6, 1.4])
+        sel_cli = o1.multiselect("Tipo de cliente", sorted(base["tipo_cliente"].unique()), key="f_cliente", placeholder="Todos")
+        enfoque = o2.selectbox("Enfoque del explorador de pedidos",
+                               ["Todos los pedidos", "Solo con reclamo", "Solo fuera de SLA"], key="f_enfoque")
+    ctx = ctx0[ctx0["tipo_cliente"].isin(sel_cli)] if sel_cli else ctx0
+    d = ctx[ctx["mes"].isin(meses)]
+    if d.empty:
+        st.warning("Sin pedidos para el tipo de cliente seleccionado.")
+        return
 
-# ------------------------------------------
-# NIVEL 4: FICHA TÉCNICA BI & GOBERNANZA HONESTA
-# ------------------------------------------
-with tab4:
-    with st.container(border=True):
-        st.subheader("1. Transparencia Documental: Qué traen los datos reales y cómo se cierran las brechas")
+    a, b = st.columns(2)
+    with a:
+        seccion("Tiempo de entrega por provincia (minutos)", "La caja muestra mediana y rango intercuartílico; los puntos son atípicos.")
+        fig = px.box(d, x="provincia", y="t_entrega", points="outliers", color_discrete_sequence=[AZUL])
+        fig.update_layout(xaxis_title=None, yaxis_title="Minutos")
+        grafico(fig, "op_box_prov")
+    with b:
+        seccion("Tiempo de entrega por canal vs. SLA (minutos)", "La marca roja indica el SLA supuesto de cada canal.")
+        fig = px.box(d, x="canal", y="t_entrega", points="outliers", color_discrete_sequence=[ACERO])
+        canales = sorted(d["canal"].unique())
+        fig.add_scatter(x=canales, y=[K.SLA_MIN[c] for c in canales], mode="markers", name="SLA",
+                        marker=dict(symbol="line-ew", size=64, line=dict(width=3, color=COLOR_ESTADO["rojo"])))
+        fig.update_layout(xaxis_title=None, yaxis_title="Minutos", showlegend=False)
+        grafico(fig, "op_box_canal")
+
+    c, e = st.columns([1.15, 1])
+    with c:
+        seccion("Variabilidad logística por provincia")
+        v = d.groupby("provincia").agg(media=("t_entrega", "mean"), mediana=("t_entrega", "median"),
+                                       p90=("t_entrega", lambda s: s.quantile(.9)), desv=("t_entrega", "std"),
+                                       fuera=("a_tiempo", lambda s: (1 - s.mean()) * 100)).reset_index()
+        v["cv"] = v["desv"] / v["media"] * 100
+        st.dataframe(v.sort_values("cv", ascending=False), hide_index=True, **AN_DF, column_config={
+            "provincia": "Provincia", "media": st.column_config.NumberColumn("Media (min)", format="%.1f"),
+            "mediana": st.column_config.NumberColumn("Mediana (min)", format="%.1f"),
+            "p90": st.column_config.NumberColumn("P90 (min)", format="%.0f"),
+            "desv": st.column_config.NumberColumn("Desv. est.", format="%.1f"),
+            "fuera": st.column_config.NumberColumn("Fuera de SLA (%)", format="%.1f"),
+            "cv": st.column_config.NumberColumn("Coef. variación (%)", format="%.1f")})
+        st.caption("El coeficiente de variación (desviación ÷ media) mide la inestabilidad relativa de las entregas.")
+    with e:
+        seccion("Motivos de reclamo (Pareto)")
+        mo = d[d["reclamos"] == 1]["motivo"].value_counts().reset_index()
+        mo.columns = ["motivo", "n"]
+        if mo.empty:
+            st.info("No hay reclamos en la selección.")
+        else:
+            mo["acum"] = mo["n"].cumsum() / mo["n"].sum() * 100
+            fig = go.Figure()
+            fig.add_bar(x=mo["motivo"], y=mo["n"], marker_color=AZUL, name="Reclamos")
+            fig.add_scatter(x=mo["motivo"], y=mo["acum"], yaxis="y2", mode="lines+markers", name="% acumulado",
+                            line=dict(color="#B7791F"))
+            fig.update_layout(yaxis=dict(title="Reclamos"), yaxis2=dict(overlaying="y", side="right", range=[0, 105], showgrid=False,
+                                                                       title="% acumulado"), legend=dict(orientation="h", y=1.15))
+            fig.update_xaxes(tickangle=-25)
+            grafico(fig, "op_pareto", 310)
+
+    seccion("Explorador de pedidos (acceso restringido)",
+            "El dataset no contiene datos personales, pero el detalle por pedido es información operativa y queda tras un control de acceso.")
+    if acceso_analista():
+        vista = d
+        if enfoque == "Solo con reclamo":
+            vista = vista[vista["reclamos"] == 1]
+        elif enfoque == "Solo fuera de SLA":
+            vista = vista[vista["a_tiempo"] == 0]
+        vista = vista[["pedido_id", "fecha", "provincia", "canal", "tipo_cliente", "t_entrega", "sla_min", "a_tiempo",
+                       "reclamos", "motivo", "ventas", "km"]].sort_values("fecha")
+        st.caption(f"{num(len(vista))} pedidos · se muestran los primeros 1.000.")
+        st.dataframe(vista.head(1000), hide_index=True, height=320, **AN_DF)
+        st.download_button("Descargar selección (CSV)", vista.to_csv(index=False).encode("utf-8-sig"),
+                           "pedidos_seleccion.csv", "text/csv")
+    else:
+        st.info("Introduce el código de acceso para ver el detalle de pedidos. Código de la demostración: ver README.")
+
+
+# ---------------------------------------------------------------------------
+# 4. METODOLOGÍA Y GOBERNANZA
+# ---------------------------------------------------------------------------
+def pagina_metodologia():
+    seccion("1. Problema empresarial y audiencias")
+    st.markdown(
+        "LogiAndes S.A. creció con información dispersa: cada área usa sus propias cifras (ventas brutas o netas, tiempos "
+        "promedio sin dispersión, reclamos sin relación con el volumen, metas separadas de la facturación). Este dashboard "
+        "integra una única definición de cada indicador para **monitorear, interpretar y actuar**.")
+    st.dataframe(pd.DataFrame([
+        ["Gerencia general", "Saber si se cumplen los objetivos", "Visión Ejecutiva: 5 KPI con semáforo y acciones sugeridas"],
+        ["Dirección comercial", "Comparar territorios, canal y periodo", "Filtros de periodo, provincia y canal; Diagnóstico Territorial"],
+        ["Operaciones", "Detectar retrasos y alta variabilidad", "Detalle Operativo: boxplots, P90, coeficiente de variación, SLA"],
+        ["Finanzas", "Una sola definición de ventas y eficiencia", "Ventas con meta de referencia y productividad USD/km (el dataset no trae margen)"],
+        ["Atención al cliente", "Comparar reclamos sin sesgo de volumen", "Tasa por 1.000 pedidos con IC 95 % y Pareto de motivos"],
+    ], columns=["Audiencia", "Necesidad", "Respuesta en el dashboard"]), hide_index=True, **AN_DF)
+
+    seccion("2. Fichas técnicas de los KPI")
+    for f in K.FICHAS:
+        with st.expander(f["Indicador"]):
+            for kk in ("Objetivo", "Fórmula", "Fuente", "Frecuencia", "Meta", "Umbral", "Interpretación", "Responsable"):
+                st.markdown(f"**{kk}:** {f[kk]}")
+
+    seccion("3. Supuestos y limitaciones de los datos")
+    st.markdown(
+        f"- **Ventas.** El dataset trae `ventas_asociadas_usd`; no distingue ventas brutas de netas ni incluye costos, por lo que no hay margen bruto. "
+        "Se usa la productividad USD/km como aproximación de eficiencia.\n"
+        f"- **Meta.** No existe en los datos. Se define una *meta de referencia*: ventas diarias de {K.nombre_mes(K.MES_BASE)} × días del mes × "
+        f"{1 + K.META_CRECIMIENTO:.2f}. Se calcula con el mismo subconjunto filtrado, y {K.nombre_mes(K.MES_BASE)} queda sin meta.\n"
+        f"- **SLA.** Supuesto por canal ({', '.join(f'{c} {m} min' for c, m in K.SLA_MIN.items())}), calibrado con la distribución histórica; "
+        "por eso el OTD nacional informa poco y la comparación entre territorios es lo valioso.\n"
+        "- **Territorio.** El nivel disponible es provincia (Pichincha, Guayas, Azuay, Manabí, Tungurahua, Loja); no hay ciudad ni línea de servicio. "
+        "El canal de entrega (Estándar urbano, Express, Programado) cumple el papel de tipo de servicio.\n"
+        "- **Periodo.** Solo tres meses de datos: no permite estacionalidad ni tendencias robustas.")
+
+    seccion("4. Reflexión: riesgos y límites")
+    a, b = st.columns(2)
+    with a:
         st.markdown(
-            """
-            Siguiendo buenas prácticas de auditoría de datos, este sistema **no inventa fuentes inexistentes** (no asume conexiones fantasma a ERPs o contabilidad analítica) ni fuerza nombres engañosos. Toda métrica proviene exclusivamente del archivo transaccional de **5.798 pedidos** (`Enero–Marzo 2025`) declarando explícitamente sus alcances y supuestos:
-            * **Nivel geográfico real (`provincia` y `region`):** Aunque el contexto narrativo menciona ciudades como Quito, Guayaquil, Cuenca, Manta, Ambato y Loja, el dataset registra únicamente la **Provincia** (`Pichincha, Guayas, Azuay, Manabí, Tungurahua, Loja`). Por honestidad metodológica, el nivel territorial se expresa como provincial.
-            * **De "Venta Neta" a `ventas_asociadas_usd`:** El archivo provee el monto económico asociado al pedido, pero no incluye columnas de impuestos, descuentos ni devoluciones. Se reporta como **Ventas Asociadas (US$)** y **Venta por Pedido (Ticket Medio)**.
-            * **De "Margen Bruto" a Productividad por Kilómetro (`US$ / km`):** Al no existir costos directos en el CSV, fabricar un margen contable sería especulativo. Se reemplaza por un KPI físico-financiero verificable: **Ventas Asociadas por Kilómetro Recorrido** (`Σ ventas_asociadas_usd ÷ Σ distancia_km`).
-            * **Derivación defendible de Entrega a Tiempo (OTD %):** Al no existir una marca binaria precalculada, se define en función de la distribución empírica de `tiempo_individual_entrega_min` por `canal_entrega`: **Express ≤ 120 min** (mediana real: 87 min), **Estándar urbano ≤ 180 min** (mediana real: 134 min) y **Programado ≤ 210 min** (mediana real: 157 min).
-            """
-        )
+            "**Sobreinteractividad.** Se limitan los controles: 3 filtros globales (periodo, provincia, canal) y como máximo 2 locales por vista. "
+            "No se ofrecen filtros por cliente o pedido en las vistas agregadas; más controles fragmentarían la muestra (algunas provincias tienen menos de 20 reclamos) y aumentarían la carga cognitiva.\n\n"
+            "**Sesgos visuales.** Los reclamos se expresan como tasa y no como conteo, para no culpar a las provincias grandes. Las escalas de color están fijadas a los umbrales "
+            "(no al mínimo y máximo de los datos), los ejes de barras parten de cero, y las tasas se muestran con intervalo de confianza. Los boxplots evitan que el promedio oculte las colas.")
+    with b:
+        st.markdown(
+            "**Privacidad.** El dataset no contiene nombres, cédulas ni identificadores de clientes o vendedores; solo `pedido_id`. Las vistas ejecutiva y territorial son agregadas, y el detalle por pedido queda tras un código de acceso.\n\n"
+            "**Gobernanza.** El control de acceso es de demostración; en producción requiere autenticación y permisos por rol. Cada KPI tiene definición, fuente, responsable y umbrales documentados, y el cálculo vive en un único módulo (`kpis.py`) compartido con el Notebook.\n\n"
+            "**Límites interpretativos.** Los indicadores muestran asociaciones, no causas. Contrastar con datos del BCE o el INEC solo mostraría coincidencias. Con 6 provincias y 3 meses, las correlaciones son exploratorias. "
+            "El semáforo depende de umbrales y metas supuestos, que deben validarse con las áreas.")
 
-    with st.container(border=True):
-        st.subheader("2. Ficha Técnica Auditada de los 5 KPIs del Sistema")
-        ficha_honesta = pd.DataFrame([
-            {
-                "Indicador (KPI)": "1. Ventas Asociadas y Ticket Medio (US$)",
-                "Objetivo": "Medir el valor económico movilizado por los pedidos logísticos en cada provincia, canal y segmento B2B.",
-                "Fórmula Exacta": "Σ ventas_asociadas_usd  |  Ticket Medio = Σ ventas_asociadas_usd ÷ Total_Pedidos",
-                "Columnas Fuente (CSV)": "ventas_asociadas_usd, pedido_id",
-                "Supuesto / Limitación Declarada": "El CSV no separa venta bruta de neta ni incluye notas de crédito.",
-                "Meta / Referencia": "Referencia interna: promedio mensual Ene–Feb ($386.6k/mes) y ticket nacional ($200,82).",
-                "Umbral Semáforo": "🟢 ≥ 98% del ticket nacional | 🟡 90%–97,9% | 🔴 < 90%",
-                "Responsable": "Dirección Comercial",
-            },
-            {
-                "Indicador (KPI)": "2. Productividad Logística (US$ / km)",
-                "Objetivo": "Evaluar la densidad económica por kilómetro recorrido ante la ausencia de datos de costo/margen bruto.",
-                "Fórmula Exacta": "Σ ventas_asociadas_usd ÷ Σ distancia_km  (Complemento: Σ tiempo_individual_entrega_min ÷ Σ distancia_km)",
-                "Columnas Fuente (CSV)": "ventas_asociadas_usd, distancia_km, tiempo_individual_entrega_min",
-                "Supuesto / Limitación Declarada": "Sustituye al Margen Bruto contable con una métrica real de eficiencia de ruteo.",
-                "Meta / Referencia": "Referencia nacional: ~$16,15 US$/km.",
-                "Umbral Semáforo": "🟢 ≥ 98% media nacional | 🟡 88%–97,9% | 🔴 < 88%",
-                "Responsable": "Operaciones y Finanzas",
-            },
-            {
-                "Indicador (KPI)": "3. Entrega a Tiempo – OTD (%) por SLA de Canal",
-                "Objetivo": "Cuantificar la confiabilidad de entrega respetando la promesa operativa distinta de cada canal.",
-                "Fórmula Exacta": "Promedio(tiempo_individual_entrega_min ≤ SLA_canal) × 100",
-                "Columnas Fuente (CSV)": "tiempo_individual_entrega_min, canal_entrega",
-                "Supuesto / Limitación Declarada": "SLA derivado de percentiles propios del dataset: Express ≤ 120m, Estándar ≤ 180m, Programado ≤ 210m.",
-                "Meta / Referencia": "≥ 85% de pedidos dentro del SLA de su canal.",
-                "Umbral Semáforo": "🟢 ≥ 85% | 🟡 75%–84,9% | 🔴 < 75%",
-                "Responsable": "Gerencia de Operaciones",
-            },
-            {
-                "Indicador (KPI)": "4. Tasa de Reclamos por 1.000 Pedidos",
-                "Objetivo": "Comparar la incidencia de reclamos entre provincias de distinto tamaño sin el sesgo del conteo bruto.",
-                "Fórmula Exacta": "(Σ reclamos_registrados ÷ Total_Pedidos) × 1.000",
-                "Columnas Fuente (CSV)": "reclamos_registrados, motivo_reclamo",
-                "Supuesto / Limitación Declarada": "Se reporta junto al conteo absoluto (n). Si n < 15 se activa alerta de inestabilidad muestral.",
-                "Meta / Referencia": "≤ 25,0 reclamos por cada 1.000 pedidos (Nacional actual: 32,3).",
-                "Umbral Semáforo": "🟢 ≤ 25,0 | 🟡 25,1–50,0 | 🔴 > 50,0 (Manabí: 66,3)",
-                "Responsable": "Atención al Cliente",
-            },
-            {
-                "Indicador (KPI)": "5. Tiempo de Entrega Mediano y P90 (min)",
-                "Objetivo": "Monitorear la velocidad real de entrega y la cola de demoras extremas (outliers de hasta 520 min).",
-                "Fórmula Exacta": "Mediana(tiempo_individual_entrega_min) y Percentil_90(tiempo_individual_entrega_min)",
-                "Columnas Fuente (CSV)": "tiempo_individual_entrega_min, tiempo_atencion_min",
-                "Supuesto / Limitación Declarada": "Expresado estrictamente en minutos. Se acompaña de la media de atención al cliente.",
-                "Meta / Referencia": "P90 ≤ 180 min a nivel consolidado.",
-                "Umbral Semáforo": "🟢 P90 ≤ 180 min | 🟡 181–220 min | 🔴 > 220 min",
-                "Responsable": "Gerencia de Operaciones",
-            },
-        ])
-        st.dataframe(ficha_honesta, hide_index=True, **AN_DF)
+    seccion("5. Herramienta")
+    st.markdown("Streamlit permite iterar rápido sobre datos ya procesados en Python y validar estructura, filtros e indicadores con la gerencia. "
+                "La definición de KPIs queda desacoplada de la interfaz, por lo que podría migrarse más adelante a una herramienta de distribución corporativa.")
 
-    with st.container(border=True):
-        st.subheader("3. Reflexión Metodológica: Sesgos, Muestras Pequeñas y Gobernanza Real")
-        r1, r2 = st.columns(2)
-        with r1:
-            st.markdown(
-                """
-                * **Conteo bruto vs. Tasa relativizada:** Guayas acumula **71 reclamos** frente a **47 de Manabí**, pero Guayas procesa un volumen mucho mayor de pedidos. En términos relativos, **Manabí (66,3 / 1.000)** y **Loja (47,0 / 1.000)** superan a **Guayas (41,5 / 1.000)**.
-                * **Advertencia sobre muestras pequeñas ($n < 15$):** Tungurahua registra solo **8 reclamos** (tasa de 12,7) y Azuay **13 reclamos** (tasa de 16,2). Con un denominador pequeño, un par de eventos adicionales alteran drásticamente la tasa, por lo que el dashboard exige mostrar siempre `n` junto a la tasa.
-                """
-            )
-        with r2:
-            st.markdown(
-                """
-                * **Sesgo de canal de entrega:** Comparar tiempos de entrega sin separar `Express` (mediana 87 min), `Estándar urbano` (134 min) y `Programado` (157 min) castigaría erróneamente a las provincias con mayor mezcla de envíos programados.
-                * **Gobernanza sin falsos positivos:** Se corrigió el filtro que ocultaba `tipo_cliente` (que es un segmento corporativo/PyME/minorista y no un dato personal). La gobernanza real se aplica sobre `pedido_id` y sobre la prohibición de tomar decisiones punitivas con tamaños muestrales insuficientes o correlaciones macroeconómicas externas (BCE/INEC) no causales.
-                """
-            )
+    with st.expander("Calidad de los datos"):
+        cal = pd.DataFrame({"Columna": base.columns, "Nulos (%)": [round(base[c].isna().mean() * 100, 1) for c in base.columns],
+                            "Valores únicos": [int(base[c].nunique()) for c in base.columns]})
+        st.dataframe(cal, hide_index=True, **AN_DF)
+        st.caption(f"{num(len(base))} pedidos · del {base['fecha'].min():%d/%m/%Y} al {base['fecha'].max():%d/%m/%Y}.")
+
+
+# ---------------------------------------------------------------------------
+# Navegación
+# ---------------------------------------------------------------------------
+t_ej, t_te, t_op, t_me = st.tabs(["Visión ejecutiva", "Diagnóstico territorial", "Detalle operativo", "Metodología y gobernanza"])
+with t_ej:
+    pagina_ejecutiva()
+with t_te:
+    pagina_territorial()
+with t_op:
+    pagina_operativa()
+with t_me:
+    pagina_metodologia()
