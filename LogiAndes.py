@@ -1,9 +1,12 @@
 """
 LogiAndes S.A. · Dashboard de Business Intelligence (Prueba Práctica 2)
 Ejecutar:  streamlit run app.py
-Todos los cálculos provienen de kpis.py, el mismo módulo que usa el Notebook.
+Archivo único: contiene el núcleo de cálculo de KPIs (sección 1) y la interfaz Streamlit (sección 2).
+El Notebook reutiliza exactamente el bloque de la sección 1, por lo que los números coinciden.
 """
+import calendar
 import inspect
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,8 +14,288 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-import kpis as K
 
+# ###########################################################################
+# SECCIÓN 1 · NÚCLEO DE CÁLCULO DE KPIs (sin dependencias de Streamlit)
+# ###########################################################################
+# ==== NUCLEO_INICIO ====
+import calendar
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+try:
+    RUTA_DATOS = Path(__file__).resolve().parent / "logiandes.csv"
+except NameError:  # ejecución dentro de un Notebook
+    RUTA_DATOS = Path.cwd() / "logiandes.csv"
+
+# ---------------------------------------------------------------------------
+# 1. Esquema de datos y supuestos explícitos
+# ---------------------------------------------------------------------------
+COLUMNAS = {
+    "pedido_id": "pedido_id",
+    "fecha_pedido": "fecha",
+    "provincia": "provincia",
+    "region": "region",
+    "canal_entrega": "canal",
+    "tipo_cliente": "tipo_cliente",
+    "tiempo_atencion_min": "t_atencion",
+    "tiempo_individual_entrega_min": "t_entrega",
+    "reclamos_registrados": "reclamos",
+    "motivo_reclamo": "motivo",
+    "ventas_asociadas_usd": "ventas",
+    "distancia_km": "km",
+}
+
+# SUPUESTO 1: el dataset no trae un indicador de puntualidad. Se define un SLA (minutos)
+# por canal, entre el P85 y el P90 histórico de cada canal (Express≈P85; Estándar y Programado≈P90).
+SLA_MIN = {"Express": 130, "Estándar urbano": 190, "Programado": 210}
+
+# SUPUESTO 2: el dataset no trae metas. Meta de referencia = ventas diarias del mes base
+# (enero) × días del mes evaluado × (1 + crecimiento objetivo).
+MES_BASE = "2026-01"
+META_CRECIMIENTO = 0.05
+
+# Regla de confianza: una tasa con menos eventos que esto se marca como "baja confianza".
+MIN_EVENTOS = 20
+
+MESES_ES = {"01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr", "05": "May", "06": "Jun",
+            "07": "Jul", "08": "Ago", "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic"}
+
+
+def nombre_mes(m):
+    return f"{MESES_ES[m[5:7]]} {m[:4]}"
+
+
+# ---------------------------------------------------------------------------
+# 2. Definición de KPIs y umbrales (semáforo)
+# ---------------------------------------------------------------------------
+KPIS = {
+    "cumplimiento": dict(nombre="Cumplimiento de meta de ventas", unidad="%", dec=1,
+                         verde=100.0, amarillo=90.0, mejor="alto"),
+    "reclamos": dict(nombre="Reclamos por 1.000 pedidos", unidad="", dec=1,
+                     verde=25.0, amarillo=50.0, mejor="bajo"),
+    "otd": dict(nombre="Entrega a tiempo (OTD)", unidad="%", dec=1,
+                verde=90.0, amarillo=80.0, mejor="alto"),
+    "p90": dict(nombre="Tiempo de entrega P90", unidad=" min", dec=0,
+                verde=180.0, amarillo=220.0, mejor="bajo"),
+    "prod": dict(nombre="Productividad logística (USD/km)", unidad="", dec=2,
+                 verde=2.5, amarillo=2.0, mejor="alto"),
+}
+
+
+def estado(clave, valor):
+    """Devuelve 'verde' | 'amarillo' | 'rojo' | 'nd' según los umbrales de la ficha."""
+    if valor is None or pd.isna(valor):
+        return "nd"
+    u = KPIS[clave]
+    if u["mejor"] == "alto":
+        return "verde" if valor >= u["verde"] else "amarillo" if valor >= u["amarillo"] else "rojo"
+    return "verde" if valor <= u["verde"] else "amarillo" if valor <= u["amarillo"] else "rojo"
+
+
+# ---------------------------------------------------------------------------
+# 3. Carga y preparación
+# ---------------------------------------------------------------------------
+def cargar_datos(ruta=RUTA_DATOS):
+    raw = pd.read_csv(ruta)
+    faltan = set(COLUMNAS) - set(raw.columns)
+    if faltan:
+        raise ValueError(f"Al CSV le faltan columnas: {sorted(faltan)}")
+    df = raw.rename(columns=COLUMNAS)[list(COLUMNAS.values())].copy()
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+    df = df.dropna(subset=["fecha"]).drop_duplicates("pedido_id")
+    for c in ("provincia", "region", "canal", "tipo_cliente"):
+        df[c] = df[c].astype(str).str.strip()
+    df["mes"] = df["fecha"].dt.strftime("%Y-%m")
+    df["sla_min"] = df["canal"].map(SLA_MIN)
+    if df["sla_min"].isna().any():
+        raise ValueError(f"Canales sin SLA definido: {sorted(df.loc[df['sla_min'].isna(), 'canal'].unique())}")
+    df["a_tiempo"] = (df["t_entrega"] <= df["sla_min"]).astype(int)
+    df["reclamos"] = (pd.to_numeric(df["reclamos"], errors="coerce").fillna(0) > 0).astype(int)
+    df["motivo"] = df["motivo"].where(df["reclamos"] == 1, "Sin reclamo").fillna("Sin motivo registrado")
+    return df.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# 4. Funciones estadísticas y de cálculo
+# ---------------------------------------------------------------------------
+def dias_mes(m):
+    return calendar.monthrange(int(m[:4]), int(m[5:7]))[1]
+
+
+def wilson(k, n, z=1.96):
+    """Intervalo de confianza 95 % de Wilson para una proporción, expresado por 1.000."""
+    if n == 0:
+        return (np.nan, np.nan)
+    p = k / n
+    den = 1 + z * z / n
+    centro = p + z * z / (2 * n)
+    amp = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    return ((centro - amp) / den * 1000, (centro + amp) / den * 1000)
+
+
+def meses_evaluables(meses):
+    """La meta de referencia solo existe para los meses posteriores al mes base."""
+    return [m for m in meses if m > MES_BASE]
+
+
+def meta_ventas(ctx, meses, por=None):
+    """Meta de referencia (USD). `ctx` = datos con todos los filtros salvo el de periodo,
+    por lo que la meta se recalcula con el MISMO subconjunto que las ventas (sin sesgo por filtros)."""
+    ev = meses_evaluables(meses)
+    base = ctx[ctx["mes"] == MES_BASE]
+    dias = sum(dias_mes(m) for m in ev)
+    factor = dias * (1 + META_CRECIMIENTO) / dias_mes(MES_BASE)
+    if por is None:
+        return base["ventas"].sum() * factor if (len(base) and ev) else np.nan
+    serie = base.groupby(por)["ventas"].sum() * factor
+    return serie if ev else serie * np.nan
+
+
+def calcular_kpis(ctx, meses):
+    d = ctx[ctx["mes"].isin(meses)]
+    n = len(d)
+    k = {"pedidos": n, "ventas": d["ventas"].sum()}
+    k["dias"] = sum(dias_mes(m) for m in meses)
+    k["ventas_dia"] = k["ventas"] / k["dias"] if k["dias"] else np.nan
+    k["ticket"] = k["ventas"] / n if n else np.nan
+    ev = meses_evaluables(meses)
+    meta = meta_ventas(ctx, meses)
+    ventas_ev = ctx[ctx["mes"].isin(ev)]["ventas"].sum()
+    k["meta"] = meta
+    k["cumplimiento"] = ventas_ev / meta * 100 if pd.notna(meta) and meta > 0 else np.nan
+    k["reclamos_n"] = int(d["reclamos"].sum())
+    k["reclamos"] = k["reclamos_n"] / n * 1000 if n else np.nan
+    k["reclamos_ic"] = wilson(k["reclamos_n"], n)
+    k["otd"] = d["a_tiempo"].mean() * 100 if n else np.nan
+    k["p90"] = d["t_entrega"].quantile(0.9) if n else np.nan
+    k["t_medio"] = d["t_entrega"].mean() if n else np.nan
+    k["prod"] = d["ventas"].sum() / d["km"].sum() if n and d["km"].sum() > 0 else np.nan
+    return k
+
+
+def resumen_por(ctx, meses, col):
+    """Tabla de KPIs por una dimensión (provincia, canal, ...)."""
+    d = ctx[ctx["mes"].isin(meses)]
+    g = d.groupby(col)
+    r = pd.DataFrame({
+        "pedidos": g.size(),
+        "ventas": g["ventas"].sum(),
+        "reclamos_n": g["reclamos"].sum(),
+        "otd": g["a_tiempo"].mean() * 100,
+        "p90": g["t_entrega"].quantile(0.9),
+        "t_medio": g["t_entrega"].mean(),
+        "km": g["km"].sum(),
+    })
+    r["ticket"] = r["ventas"] / r["pedidos"]
+    r["reclamos"] = r["reclamos_n"] / r["pedidos"] * 1000
+    r["prod"] = r["ventas"] / r["km"]
+    ic = [wilson(k, n) for k, n in zip(r["reclamos_n"], r["pedidos"])]
+    r["ic_inf"] = [x[0] for x in ic]
+    r["ic_sup"] = [x[1] for x in ic]
+    ev = meses_evaluables(meses)
+    meta = meta_ventas(ctx, meses, por=col).reindex(r.index)
+    ventas_ev = ctx[ctx["mes"].isin(ev)].groupby(col)["ventas"].sum().reindex(r.index)
+    r["meta"] = meta
+    r["cumplimiento"] = ventas_ev / meta.replace(0, np.nan) * 100
+    return r.reset_index()
+
+
+def resumen_mensual(ctx):
+    """Serie mensual con ventas, meta de referencia y KPIs (mes base sin meta)."""
+    filas = []
+    for m in sorted(ctx["mes"].unique()):
+        k = calcular_kpis(ctx, [m])
+        filas.append({"mes": m, **{x: k[x] for x in
+                      ("pedidos", "ventas", "ventas_dia", "meta", "cumplimiento", "reclamos", "otd", "p90", "prod")}})
+    return pd.DataFrame(filas)
+
+
+def semaforo_por(r):
+    return pd.DataFrame({k: [estado(k, v) for v in r[k]] for k in KPIS}, index=r.index)
+
+
+ACCIONES = {
+    "cumplimiento": "Revisar plan comercial y cartera del territorio; validar si la brecha es estacional o estructural.",
+    "reclamos": "Auditar los motivos de reclamo dominantes (Detalle Operativo) y acordar plan correctivo con Atención al Cliente.",
+    "otd": "Revisar asignación de rutas, ventanas horarias y capacidad de flota del territorio.",
+    "p90": "Investigar los pedidos de cola larga (valores atípicos) y las rutas de mayor distancia.",
+    "prod": "Evaluar densidad de rutas y consolidación de entregas (menos km por USD vendido).",
+}
+
+
+# ---------------------------------------------------------------------------
+# 5. Ficha técnica de KPIs (se genera con las mismas constantes que el cálculo)
+# ---------------------------------------------------------------------------
+def _sla_txt():
+    return ", ".join(f"{c} ≤ {m} min" for c, m in SLA_MIN.items())
+
+
+FICHAS = [
+    {
+        "Indicador": "1. Cumplimiento de meta de ventas",
+        "Objetivo": "Saber si las ventas avanzan al ritmo esperado, comparando contra una meta de referencia calculada con el mismo subconjunto de datos.",
+        "Fórmula": f"Σ ventas_asociadas_usd (meses evaluados) ÷ Meta × 100. Meta = ventas diarias del mes base ({nombre_mes(MES_BASE)}) × días del mes × (1 + {META_CRECIMIENTO:.0%}).",
+        "Fuente": "CSV de pedidos: ventas_asociadas_usd, fecha_pedido.",
+        "Frecuencia": "Mensual (consulta semanal del acumulado).",
+        "Meta": "≥ 100 % de la meta de referencia.",
+        "Umbral": "Verde ≥ 100 % · Amarillo 90–99,9 % · Rojo < 90 %.",
+        "Interpretación": "Mide ritmo comercial contra una línea base interna. El mes base no tiene meta (N/D). Es una meta de referencia del analista, no una cuota oficial.",
+        "Responsable": "Dirección Comercial / Gerencia General",
+    },
+    {
+        "Indicador": "2. Reclamos por 1.000 pedidos",
+        "Objetivo": "Comparar la calidad de servicio entre territorios de distinto volumen, usando una tasa y no un conteo.",
+        "Fórmula": "(Σ reclamos_registrados ÷ nº de pedidos) × 1.000. Se reporta con intervalo de confianza 95 % de Wilson.",
+        "Fuente": "CSV de pedidos: reclamos_registrados, motivo_reclamo.",
+        "Frecuencia": "Semanal / mensual.",
+        "Meta": "≤ 25 reclamos por 1.000 pedidos.",
+        "Umbral": "Verde ≤ 25 · Amarillo 25,1–50 · Rojo > 50.",
+        "Interpretación": f"Evita que Guayas o Pichincha parezcan peores solo por volumen. Con menos de {MIN_EVENTOS} reclamos la tasa tiene baja confianza y se marca así.",
+        "Responsable": "Atención al Cliente",
+    },
+    {
+        "Indicador": "3. Entrega a tiempo (OTD)",
+        "Objetivo": "Medir la puntualidad del servicio logístico frente a la promesa de cada canal.",
+        "Fórmula": "(Pedidos con tiempo_individual_entrega_min ≤ SLA del canal ÷ total de pedidos) × 100.",
+        "Fuente": f"CSV de pedidos: tiempo_individual_entrega_min, canal_entrega. SLA supuesto: {_sla_txt()}.",
+        "Frecuencia": "Diaria / semanal / mensual.",
+        "Meta": "≥ 90 % de pedidos dentro del SLA.",
+        "Umbral": "Verde ≥ 90 % · Amarillo 80–89,9 % · Rojo < 80 %.",
+        "Interpretación": "Los SLA son un supuesto calibrado con la distribución histórica; el valor nacional es poco informativo y la utilidad está en comparar provincias y canales.",
+        "Responsable": "Gerencia de Operaciones",
+    },
+    {
+        "Indicador": "4. Tiempo de entrega P90 (variabilidad)",
+        "Objetivo": "Detectar territorios con colas largas de retraso que el promedio esconde.",
+        "Fórmula": "Percentil 90 de tiempo_individual_entrega_min (minutos).",
+        "Fuente": "CSV de pedidos: tiempo_individual_entrega_min.",
+        "Frecuencia": "Semanal / mensual.",
+        "Meta": "≤ 180 min.",
+        "Umbral": "Verde ≤ 180 · Amarillo 181–220 · Rojo > 220 min.",
+        "Interpretación": "Indica el tiempo dentro del cual se entrega el 90 % de los pedidos. Depende del mix de canales: una provincia con más Programado tendrá P90 mayor sin que sea peor.",
+        "Responsable": "Gerencia de Operaciones",
+    },
+    {
+        "Indicador": "5. Productividad logística (USD por km)",
+        "Objetivo": "Evaluar cuánta venta genera cada kilómetro recorrido, como aproximación a la eficiencia de ruta. Sustituye al margen bruto, que el dataset no contiene.",
+        "Fórmula": "Σ ventas_asociadas_usd ÷ Σ distancia_km.",
+        "Fuente": "CSV de pedidos: ventas_asociadas_usd, distancia_km.",
+        "Frecuencia": "Mensual.",
+        "Meta": "≥ 2,50 USD/km.",
+        "Umbral": "Verde ≥ 2,50 · Amarillo 2,00–2,49 · Rojo < 2,00.",
+        "Interpretación": "Es un proxy de eficiencia, no de rentabilidad: no incluye costos. Un valor bajo señala rutas largas con poca venta por pedido.",
+        "Responsable": "Finanzas / Operaciones",
+    },
+]
+# ==== NUCLEO_FIN ====
+
+
+# ###########################################################################
+# SECCIÓN 2 · INTERFAZ STREAMLIT (dashboard)
+# ###########################################################################
 # ---------------------------------------------------------------------------
 # Configuración y estilo
 # ---------------------------------------------------------------------------
@@ -96,7 +379,7 @@ def seccion(titulo, nota=None):
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner="Cargando datos…")
 def datos():
-    return K.cargar_datos()
+    return cargar_datos()
 
 
 try:
@@ -106,8 +389,8 @@ except Exception as e:  # noqa: BLE001
     st.stop()
 
 MESES_TODOS = sorted(base["mes"].unique())
-OPC_PERIODO = {f"Trimestre ({K.nombre_mes(MESES_TODOS[0])[:3]}–{K.nombre_mes(MESES_TODOS[-1])[:3]})": MESES_TODOS}
-OPC_PERIODO.update({K.nombre_mes(m).split()[0]: [m] for m in MESES_TODOS})
+OPC_PERIODO = {f"Trimestre ({nombre_mes(MESES_TODOS[0])[:3]}–{nombre_mes(MESES_TODOS[-1])[:3]})": MESES_TODOS}
+OPC_PERIODO.update({nombre_mes(m).split()[0]: [m] for m in MESES_TODOS})
 PERIODO_DEF = next(iter(OPC_PERIODO))
 CLAVES = ["f_periodo", "f_prov", "f_canal", "f_region", "f_cliente", "f_relacion", "f_enfoque"]
 
@@ -123,7 +406,7 @@ def reiniciar():
 st.markdown("<div class='titulo'>LogiAndes S.A. · Monitoreo de desempeño</div>", unsafe_allow_html=True)
 st.markdown(
     f"<div class='subtitulo'>Quito, Guayaquil, Cuenca, Manta, Ambato y Loja · pedidos de "
-    f"{K.nombre_mes(MESES_TODOS[0])} a {K.nombre_mes(MESES_TODOS[-1])} · análisis a nivel de provincia</div>",
+    f"{nombre_mes(MESES_TODOS[0])} a {nombre_mes(MESES_TODOS[-1])} · análisis a nivel de provincia</div>",
     unsafe_allow_html=True)
 
 with st.container(border=True):
@@ -160,7 +443,7 @@ def mes_previo(ms):
 # Componentes reutilizables
 # ---------------------------------------------------------------------------
 def tarjeta(col, titulo, valor_txt, clave_kpi, valor, meta_txt, delta_html=""):
-    est = K.estado(clave_kpi, valor)
+    est = estado(clave_kpi, valor)
     c = COLOR_ESTADO[est]
     col.markdown(
         f"<div class='kpi'><div class='kpi-t'>{titulo}</div><div class='kpi-v'>{valor_txt}</div>"
@@ -181,16 +464,16 @@ def delta(act, prev, dec=1, suf="", mejor="alto", pct=False):
 
 def tabla_semaforo(r, idx_col):
     """Tabla de KPIs por territorio con celdas coloreadas según el umbral de la ficha."""
-    sem = K.semaforo_por(r)
+    sem = semaforo_por(r)
     vis = pd.DataFrame({
         idx_col.capitalize(): r[idx_col],
         "Cumplimiento meta": [num(v, 1, suf=" %") for v in r["cumplimiento"]],
-        "Reclamos/1.000": [num(v, 1) + (" ⚠" if n < K.MIN_EVENTOS else "") for v, n in zip(r["reclamos"], r["reclamos_n"])],
+        "Reclamos/1.000": [num(v, 1) + (" ⚠" if n < MIN_EVENTOS else "") for v, n in zip(r["reclamos"], r["reclamos_n"])],
         "Entrega a tiempo": [num(v, 1, suf=" %") for v in r["otd"]],
         "P90 entrega (min)": [num(v, 0) for v in r["p90"]],
         "USD por km": [num(v, 2) for v in r["prod"]],
     })
-    mapa = dict(zip(vis.columns[1:], K.KPIS))
+    mapa = dict(zip(vis.columns[1:], KPIS))
 
     def css(_):
         out = pd.DataFrame("", index=vis.index, columns=vis.columns)
@@ -205,9 +488,9 @@ def tabla_semaforo(r, idx_col):
 # 1. VISIÓN EJECUTIVA
 # ---------------------------------------------------------------------------
 def pagina_ejecutiva():
-    k = K.calcular_kpis(ctx0, meses)
+    k = calcular_kpis(ctx0, meses)
     pm = mes_previo(meses)
-    kp = K.calcular_kpis(ctx0, pm) if pm else None
+    kp = calcular_kpis(ctx0, pm) if pm else None
     g = (lambda x: kp[x]) if kp else (lambda x: None)
 
     cols = st.columns(5)
@@ -225,8 +508,8 @@ def pagina_ejecutiva():
     tarjeta(cols[4], "Productividad logística", num(k["prod"], 2, suf=" USD/km"), "prod", k["prod"], "Meta ≥ 2,50",
             delta(k["prod"], g("prod"), 2, "") if kp else "")
 
-    r = K.resumen_por(ctx0, meses, "provincia")
-    sem = K.semaforo_por(r)
+    r = resumen_por(ctx0, meses, "provincia")
+    sem = semaforo_por(r)
     rojas = r.loc[(sem == "rojo").any(axis=1), "provincia"].tolist()
     if len(r) > 1:
         msg = (f"**{len(rojas)} de {len(r)} provincias** tienen al menos un indicador en rojo: {', '.join(rojas)}."
@@ -239,11 +522,11 @@ def pagina_ejecutiva():
         tabla_semaforo(r, "provincia")
     with b:
         seccion("Ventas vs. meta de referencia por mes", "La serie mensual no depende del filtro de periodo; sí de provincia y canal.")
-        m = K.resumen_mensual(ctx0)
+        m = resumen_mensual(ctx0)
         fig = go.Figure()
-        fig.add_bar(x=[K.nombre_mes(x) for x in m["mes"]], y=m["ventas"], name="Ventas", marker_color=AZUL,
+        fig.add_bar(x=[nombre_mes(x) for x in m["mes"]], y=m["ventas"], name="Ventas", marker_color=AZUL,
                     text=[num(v, 0, "$") for v in m["ventas"]], textposition="outside")
-        fig.add_scatter(x=[K.nombre_mes(x) for x in m["mes"]], y=m["meta"], name="Meta de referencia", mode="lines+markers",
+        fig.add_scatter(x=[nombre_mes(x) for x in m["mes"]], y=m["meta"], name="Meta de referencia", mode="lines+markers",
                         line=dict(color="#B7791F", dash="dash"), connectgaps=False)
         fig.update_yaxes(title="USD", rangemode="tozero")
         fig.update_layout(legend=dict(orientation="h", y=1.12, x=0))
@@ -252,14 +535,14 @@ def pagina_ejecutiva():
     seccion("Acciones sugeridas", "Prioridad alta = indicador en rojo; media = en seguimiento. Derivadas automáticamente de los umbrales.")
     filas = []
     for i, fila in r.iterrows():
-        for kk in K.KPIS:
+        for kk in KPIS:
             e = sem.loc[i, kk]
             if e in ("rojo", "amarillo"):
-                u = K.KPIS[kk]
-                extra = " (muestra baja: confirmar con más datos)" if kk == "reclamos" and fila["reclamos_n"] < K.MIN_EVENTOS else ""
+                u = KPIS[kk]
+                extra = " (muestra baja: confirmar con más datos)" if kk == "reclamos" and fila["reclamos_n"] < MIN_EVENTOS else ""
                 filas.append({"Prioridad": "Alta" if e == "rojo" else "Media", "Provincia": fila["provincia"],
                               "Indicador": u["nombre"], "Valor": num(fila[kk], u["dec"], suf=u["unidad"]),
-                              "Meta": num(u["verde"], u["dec"], suf=u["unidad"]), "Acción sugerida": K.ACCIONES[kk] + extra})
+                              "Meta": num(u["verde"], u["dec"], suf=u["unidad"]), "Acción sugerida": ACCIONES[kk] + extra})
     if filas:
         acc = pd.DataFrame(filas)
         acc["_o"] = acc["Prioridad"].map({"Alta": 0, "Media": 1})
@@ -287,7 +570,7 @@ def pagina_territorial():
     if d.empty:
         st.warning("Sin pedidos para la región seleccionada.")
         return
-    r = K.resumen_por(ctx, meses, "provincia")
+    r = resumen_por(ctx, meses, "provincia")
 
     a, b = st.columns(2)
     with a:
@@ -303,7 +586,7 @@ def pagina_territorial():
         t = r.sort_values("reclamos")
         fig = go.Figure(go.Bar(
             x=t["reclamos"], y=t["provincia"], orientation="h",
-            marker_color=[COLOR_ESTADO[K.estado("reclamos", v)] for v in t["reclamos"]],
+            marker_color=[COLOR_ESTADO[estado("reclamos", v)] for v in t["reclamos"]],
             error_x=dict(type="data", symmetric=False, array=t["ic_sup"] - t["reclamos"], arrayminus=t["reclamos"] - t["ic_inf"],
                          color="#475569", thickness=1.2),
             text=[num(v, 1) for v in t["reclamos"]], textposition="inside", insidetextanchor="start",
@@ -354,7 +637,7 @@ def pagina_territorial():
 
     seccion("Tabla comparativa por provincia")
     t = r.copy()
-    t["confianza"] = np.where(t["reclamos_n"] < K.MIN_EVENTOS, "Baja (<20 reclamos)", "Aceptable")
+    t["confianza"] = np.where(t["reclamos_n"] < MIN_EVENTOS, "Baja (<20 reclamos)", "Aceptable")
     t = t.sort_values("ventas", ascending=False)[["provincia", "pedidos", "ventas", "ticket", "cumplimiento", "reclamos_n",
                                                     "reclamos", "ic_inf", "ic_sup", "confianza", "otd", "p90", "prod"]]
     st.dataframe(t, hide_index=True, **AN_DF, column_config={
@@ -407,7 +690,7 @@ def pagina_operativa():
         seccion("Tiempo de entrega por canal vs. SLA (minutos)", "La marca roja indica el SLA supuesto de cada canal.")
         fig = px.box(d, x="canal", y="t_entrega", points="outliers", color_discrete_sequence=[ACERO])
         canales = sorted(d["canal"].unique())
-        fig.add_scatter(x=canales, y=[K.SLA_MIN[c] for c in canales], mode="markers", name="SLA",
+        fig.add_scatter(x=canales, y=[SLA_MIN[c] for c in canales], mode="markers", name="SLA",
                         marker=dict(symbol="line-ew", size=64, line=dict(width=3, color=COLOR_ESTADO["rojo"])))
         fig.update_layout(xaxis_title=None, yaxis_title="Minutos", showlegend=False)
         grafico(fig, "op_box_canal")
@@ -480,7 +763,7 @@ def pagina_metodologia():
     ], columns=["Audiencia", "Necesidad", "Respuesta en el dashboard"]), hide_index=True, **AN_DF)
 
     seccion("2. Fichas técnicas de los KPI")
-    for f in K.FICHAS:
+    for f in FICHAS:
         with st.expander(f["Indicador"]):
             for kk in ("Objetivo", "Fórmula", "Fuente", "Frecuencia", "Meta", "Umbral", "Interpretación", "Responsable"):
                 st.markdown(f"**{kk}:** {f[kk]}")
@@ -489,9 +772,9 @@ def pagina_metodologia():
     st.markdown(
         f"- **Ventas.** El dataset trae `ventas_asociadas_usd`; no distingue ventas brutas de netas ni incluye costos, por lo que no hay margen bruto. "
         "Se usa la productividad USD/km como aproximación de eficiencia.\n"
-        f"- **Meta.** No existe en los datos. Se define una *meta de referencia*: ventas diarias de {K.nombre_mes(K.MES_BASE)} × días del mes × "
-        f"{1 + K.META_CRECIMIENTO:.2f}. Se calcula con el mismo subconjunto filtrado, y {K.nombre_mes(K.MES_BASE)} queda sin meta.\n"
-        f"- **SLA.** Supuesto por canal ({', '.join(f'{c} {m} min' for c, m in K.SLA_MIN.items())}), calibrado con la distribución histórica; "
+        f"- **Meta.** No existe en los datos. Se define una *meta de referencia*: ventas diarias de {nombre_mes(MES_BASE)} × días del mes × "
+        f"{1 + META_CRECIMIENTO:.2f}. Se calcula con el mismo subconjunto filtrado, y {nombre_mes(MES_BASE)} queda sin meta.\n"
+        f"- **SLA.** Supuesto por canal ({', '.join(f'{c} {m} min' for c, m in SLA_MIN.items())}), calibrado con la distribución histórica; "
         "por eso el OTD nacional informa poco y la comparación entre territorios es lo valioso.\n"
         "- **Territorio.** El nivel disponible es provincia (Pichincha, Guayas, Azuay, Manabí, Tungurahua, Loja); no hay ciudad ni línea de servicio. "
         "El canal de entrega (Estándar urbano, Express, Programado) cumple el papel de tipo de servicio.\n"
@@ -508,7 +791,7 @@ def pagina_metodologia():
     with b:
         st.markdown(
             "**Privacidad.** El dataset no contiene nombres, cédulas ni identificadores de clientes o vendedores; solo `pedido_id`. Las vistas ejecutiva y territorial son agregadas, y el detalle por pedido queda tras un código de acceso.\n\n"
-            "**Gobernanza.** El control de acceso es de demostración; en producción requiere autenticación y permisos por rol. Cada KPI tiene definición, fuente, responsable y umbrales documentados, y el cálculo vive en un único módulo (`kpis.py`) compartido con el Notebook.\n\n"
+            "**Gobernanza.** El control de acceso es de demostración; en producción requiere autenticación y permisos por rol. Cada KPI tiene definición, fuente, responsable y umbrales documentados, y el cálculo de KPIs vive en un solo bloque (sección 1 de este archivo), reutilizado tal cual por el Notebook.\n\n"
             "**Límites interpretativos.** Los indicadores muestran asociaciones, no causas. Contrastar con datos del BCE o el INEC solo mostraría coincidencias. Con 6 provincias y 3 meses, las correlaciones son exploratorias. "
             "El semáforo depende de umbrales y metas supuestos, que deben validarse con las áreas.")
 
