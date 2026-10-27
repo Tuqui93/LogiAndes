@@ -1,11 +1,13 @@
 """
-LogiAndes S.A. · Dashboard de Business Intelligence (Prueba Práctica 2)
-Ejecutar:  streamlit run app.py
-Archivo único: contiene el núcleo de cálculo de KPIs (sección 1) y la interfaz Streamlit (sección 2).
-El Notebook reutiliza exactamente el bloque de la sección 1, por lo que los números coinciden.
-"""
-import calendar
+LogiAndes S.A. · Solución de Business Intelligence Accionable (Prueba Práctica 2)
+Materia: Visualización, Storytelling y Business Intelligence"""
+
+import hashlib
 import inspect
+import io
+import re
+import unicodedata
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -14,329 +16,19 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-
-# ###########################################################################
-# SECCIÓN 1 · NÚCLEO DE CÁLCULO DE KPIs (sin dependencias de Streamlit)
-# ###########################################################################
-# ==== NUCLEO_INICIO ====
-import calendar
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
-
-try:
-    RUTA_DATOS = Path(__file__).resolve().parent / "logiandes.csv"
-except NameError:  # ejecución dentro de un Notebook
-    RUTA_DATOS = Path.cwd() / "logiandes.csv"
-
-# ---------------------------------------------------------------------------
-# 1. Esquema de datos y supuestos explícitos
-# ---------------------------------------------------------------------------
-COLUMNAS = {
-    "pedido_id": "pedido_id",
-    "fecha_pedido": "fecha",
-    "provincia": "provincia",
-    "region": "region",
-    "canal_entrega": "canal",
-    "tipo_cliente": "tipo_cliente",
-    "tiempo_atencion_min": "t_atencion",
-    "tiempo_individual_entrega_min": "t_entrega",
-    "reclamos_registrados": "reclamos",
-    "motivo_reclamo": "motivo",
-    "ventas_asociadas_usd": "ventas",
-    "distancia_km": "km",
-}
-
-# SUPUESTO 1: el dataset no trae un indicador de puntualidad. Se define un SLA (minutos)
-# por canal, entre el P85 y el P90 histórico de cada canal (Express≈P85; Estándar y Programado≈P90).
-SLA_MIN = {"Express": 130, "Estándar urbano": 190, "Programado": 210}
-
-# SUPUESTO 2: el dataset no trae metas. Meta de referencia = ventas diarias del mes base
-# (enero) × días del mes evaluado × (1 + crecimiento objetivo).
-MES_BASE = "2026-01"
-META_CRECIMIENTO = 0.05
-
-# Regla de confianza: una tasa con menos eventos que esto se marca como "baja confianza".
-MIN_EVENTOS = 20
-
-MESES_ES = {"01": "Ene", "02": "Feb", "03": "Mar", "04": "Abr", "05": "May", "06": "Jun",
-            "07": "Jul", "08": "Ago", "09": "Sep", "10": "Oct", "11": "Nov", "12": "Dic"}
-
-
-def nombre_mes(m):
-    return f"{MESES_ES[m[5:7]]} {m[:4]}"
-
-
-# ---------------------------------------------------------------------------
-# 2. Definición de KPIs y umbrales (semáforo)
-# ---------------------------------------------------------------------------
-KPIS = {
-    "cumplimiento": dict(nombre="Cumplimiento de meta de ventas", unidad="%", dec=1,
-                         verde=100.0, amarillo=90.0, mejor="alto"),
-    "reclamos": dict(nombre="Reclamos por 1.000 pedidos", unidad="", dec=1,
-                     verde=25.0, amarillo=50.0, mejor="bajo"),
-    "otd": dict(nombre="Entrega a tiempo (OTD)", unidad="%", dec=1,
-                verde=90.0, amarillo=80.0, mejor="alto"),
-    "p90": dict(nombre="Tiempo de entrega P90", unidad=" min", dec=0,
-                verde=180.0, amarillo=220.0, mejor="bajo"),
-    "prod": dict(nombre="Productividad logística (USD/km)", unidad="", dec=2,
-                 verde=2.5, amarillo=2.0, mejor="alto"),
-}
-
-
-def estado(clave, valor):
-    """Devuelve 'verde' | 'amarillo' | 'rojo' | 'nd' según los umbrales de la ficha."""
-    if valor is None or pd.isna(valor):
-        return "nd"
-    u = KPIS[clave]
-    if u["mejor"] == "alto":
-        return "verde" if valor >= u["verde"] else "amarillo" if valor >= u["amarillo"] else "rojo"
-    return "verde" if valor <= u["verde"] else "amarillo" if valor <= u["amarillo"] else "rojo"
-
-
-# ---------------------------------------------------------------------------
-# 3. Carga y preparación
-# ---------------------------------------------------------------------------
-def cargar_datos(ruta=RUTA_DATOS):
-    raw = pd.read_csv(ruta)
-    faltan = set(COLUMNAS) - set(raw.columns)
-    if faltan:
-        raise ValueError(f"Al CSV le faltan columnas: {sorted(faltan)}")
-    df = raw.rename(columns=COLUMNAS)[list(COLUMNAS.values())].copy()
-    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
-    df = df.dropna(subset=["fecha"]).drop_duplicates("pedido_id")
-    for c in ("provincia", "region", "canal", "tipo_cliente"):
-        df[c] = df[c].astype(str).str.strip()
-    df["mes"] = df["fecha"].dt.strftime("%Y-%m")
-    df["sla_min"] = df["canal"].map(SLA_MIN)
-    if df["sla_min"].isna().any():
-        raise ValueError(f"Canales sin SLA definido: {sorted(df.loc[df['sla_min'].isna(), 'canal'].unique())}")
-    df["a_tiempo"] = (df["t_entrega"] <= df["sla_min"]).astype(int)
-    df["reclamos"] = (pd.to_numeric(df["reclamos"], errors="coerce").fillna(0) > 0).astype(int)
-    df["motivo"] = df["motivo"].where(df["reclamos"] == 1, "Sin reclamo").fillna("Sin motivo registrado")
-    return df.reset_index(drop=True)
-
-
-# ---------------------------------------------------------------------------
-# 4. Funciones estadísticas y de cálculo
-# ---------------------------------------------------------------------------
-def dias_mes(m):
-    return calendar.monthrange(int(m[:4]), int(m[5:7]))[1]
-
-
-def wilson(k, n, z=1.96):
-    """Intervalo de confianza 95 % de Wilson para una proporción, expresado por 1.000."""
-    if n == 0:
-        return (np.nan, np.nan)
-    p = k / n
-    den = 1 + z * z / n
-    centro = p + z * z / (2 * n)
-    amp = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
-    return ((centro - amp) / den * 1000, (centro + amp) / den * 1000)
-
-
-def meses_evaluables(meses):
-    """La meta de referencia solo existe para los meses posteriores al mes base."""
-    return [m for m in meses if m > MES_BASE]
-
-
-def meta_ventas(ctx, meses, por=None):
-    """Meta de referencia (USD). `ctx` = datos con todos los filtros salvo el de periodo,
-    por lo que la meta se recalcula con el MISMO subconjunto que las ventas (sin sesgo por filtros)."""
-    ev = meses_evaluables(meses)
-    base = ctx[ctx["mes"] == MES_BASE]
-    dias = sum(dias_mes(m) for m in ev)
-    factor = dias * (1 + META_CRECIMIENTO) / dias_mes(MES_BASE)
-    if por is None:
-        return base["ventas"].sum() * factor if (len(base) and ev) else np.nan
-    serie = base.groupby(por)["ventas"].sum() * factor
-    return serie if ev else serie * np.nan
-
-
-def calcular_kpis(ctx, meses):
-    d = ctx[ctx["mes"].isin(meses)]
-    n = len(d)
-    k = {"pedidos": n, "ventas": d["ventas"].sum()}
-    k["dias"] = sum(dias_mes(m) for m in meses)
-    k["ventas_dia"] = k["ventas"] / k["dias"] if k["dias"] else np.nan
-    k["ticket"] = k["ventas"] / n if n else np.nan
-    ev = meses_evaluables(meses)
-    meta = meta_ventas(ctx, meses)
-    ventas_ev = ctx[ctx["mes"].isin(ev)]["ventas"].sum()
-    k["meta"] = meta
-    k["cumplimiento"] = ventas_ev / meta * 100 if pd.notna(meta) and meta > 0 else np.nan
-    k["reclamos_n"] = int(d["reclamos"].sum())
-    k["reclamos"] = k["reclamos_n"] / n * 1000 if n else np.nan
-    k["reclamos_ic"] = wilson(k["reclamos_n"], n)
-    k["otd"] = d["a_tiempo"].mean() * 100 if n else np.nan
-    k["p90"] = d["t_entrega"].quantile(0.9) if n else np.nan
-    k["t_medio"] = d["t_entrega"].mean() if n else np.nan
-    k["prod"] = d["ventas"].sum() / d["km"].sum() if n and d["km"].sum() > 0 else np.nan
-    return k
-
-
-def resumen_por(ctx, meses, col):
-    """Tabla de KPIs por una dimensión (provincia, canal, ...)."""
-    d = ctx[ctx["mes"].isin(meses)]
-    g = d.groupby(col)
-    r = pd.DataFrame({
-        "pedidos": g.size(),
-        "ventas": g["ventas"].sum(),
-        "reclamos_n": g["reclamos"].sum(),
-        "otd": g["a_tiempo"].mean() * 100,
-        "p90": g["t_entrega"].quantile(0.9),
-        "t_medio": g["t_entrega"].mean(),
-        "km": g["km"].sum(),
-    })
-    r["ticket"] = r["ventas"] / r["pedidos"]
-    r["reclamos"] = r["reclamos_n"] / r["pedidos"] * 1000
-    r["prod"] = r["ventas"] / r["km"]
-    ic = [wilson(k, n) for k, n in zip(r["reclamos_n"], r["pedidos"])]
-    r["ic_inf"] = [x[0] for x in ic]
-    r["ic_sup"] = [x[1] for x in ic]
-    ev = meses_evaluables(meses)
-    meta = meta_ventas(ctx, meses, por=col).reindex(r.index)
-    ventas_ev = ctx[ctx["mes"].isin(ev)].groupby(col)["ventas"].sum().reindex(r.index)
-    r["meta"] = meta
-    r["cumplimiento"] = ventas_ev / meta.replace(0, np.nan) * 100
-    return r.reset_index()
-
-
-def resumen_mensual(ctx):
-    """Serie mensual con ventas, meta de referencia y KPIs (mes base sin meta)."""
-    filas = []
-    for m in sorted(ctx["mes"].unique()):
-        k = calcular_kpis(ctx, [m])
-        filas.append({"mes": m, **{x: k[x] for x in
-                      ("pedidos", "ventas", "ventas_dia", "meta", "cumplimiento", "reclamos", "otd", "p90", "prod")}})
-    return pd.DataFrame(filas)
-
-
-def semaforo_por(r):
-    return pd.DataFrame({k: [estado(k, v) for v in r[k]] for k in KPIS}, index=r.index)
-
-
-ACCIONES = {
-    "cumplimiento": "Revisar plan comercial y cartera del territorio; validar si la brecha es estacional o estructural.",
-    "reclamos": "Auditar los motivos de reclamo dominantes (Detalle Operativo) y acordar plan correctivo con Atención al Cliente.",
-    "otd": "Revisar asignación de rutas, ventanas horarias y capacidad de flota del territorio.",
-    "p90": "Investigar los pedidos de cola larga (valores atípicos) y las rutas de mayor distancia.",
-    "prod": "Evaluar densidad de rutas y consolidación de entregas (menos km por USD vendido).",
-}
-
-
-# ---------------------------------------------------------------------------
-# 5. Ficha técnica de KPIs (se genera con las mismas constantes que el cálculo)
-# ---------------------------------------------------------------------------
-def _sla_txt():
-    return ", ".join(f"{c} ≤ {m} min" for c, m in SLA_MIN.items())
-
-
-FICHAS = [
-    {
-        "Indicador": "1. Cumplimiento de meta de ventas",
-        "Objetivo": "Saber si las ventas avanzan al ritmo esperado, comparando contra una meta de referencia calculada con el mismo subconjunto de datos.",
-        "Fórmula": f"Σ ventas_asociadas_usd (meses evaluados) ÷ Meta × 100. Meta = ventas diarias del mes base ({nombre_mes(MES_BASE)}) × días del mes × (1 + {META_CRECIMIENTO:.0%}).",
-        "Fuente": "CSV de pedidos: ventas_asociadas_usd, fecha_pedido.",
-        "Frecuencia": "Mensual (consulta semanal del acumulado).",
-        "Meta": "≥ 100 % de la meta de referencia.",
-        "Umbral": "Verde ≥ 100 % · Amarillo 90–99,9 % · Rojo < 90 %.",
-        "Interpretación": "Mide ritmo comercial contra una línea base interna. El mes base no tiene meta (N/D). Es una meta de referencia del analista, no una cuota oficial.",
-        "Responsable": "Dirección Comercial / Gerencia General",
-    },
-    {
-        "Indicador": "2. Reclamos por 1.000 pedidos",
-        "Objetivo": "Comparar la calidad de servicio entre territorios de distinto volumen, usando una tasa y no un conteo.",
-        "Fórmula": "(Σ reclamos_registrados ÷ nº de pedidos) × 1.000. Se reporta con intervalo de confianza 95 % de Wilson.",
-        "Fuente": "CSV de pedidos: reclamos_registrados, motivo_reclamo.",
-        "Frecuencia": "Semanal / mensual.",
-        "Meta": "≤ 25 reclamos por 1.000 pedidos.",
-        "Umbral": "Verde ≤ 25 · Amarillo 25,1–50 · Rojo > 50.",
-        "Interpretación": f"Evita que Guayas o Pichincha parezcan peores solo por volumen. Con menos de {MIN_EVENTOS} reclamos la tasa tiene baja confianza y se marca así.",
-        "Responsable": "Atención al Cliente",
-    },
-    {
-        "Indicador": "3. Entrega a tiempo (OTD)",
-        "Objetivo": "Medir la puntualidad del servicio logístico frente a la promesa de cada canal.",
-        "Fórmula": "(Pedidos con tiempo_individual_entrega_min ≤ SLA del canal ÷ total de pedidos) × 100.",
-        "Fuente": f"CSV de pedidos: tiempo_individual_entrega_min, canal_entrega. SLA supuesto: {_sla_txt()}.",
-        "Frecuencia": "Diaria / semanal / mensual.",
-        "Meta": "≥ 90 % de pedidos dentro del SLA.",
-        "Umbral": "Verde ≥ 90 % · Amarillo 80–89,9 % · Rojo < 80 %.",
-        "Interpretación": "Los SLA son un supuesto calibrado con la distribución histórica; el valor nacional es poco informativo y la utilidad está en comparar provincias y canales.",
-        "Responsable": "Gerencia de Operaciones",
-    },
-    {
-        "Indicador": "4. Tiempo de entrega P90 (variabilidad)",
-        "Objetivo": "Detectar territorios con colas largas de retraso que el promedio esconde.",
-        "Fórmula": "Percentil 90 de tiempo_individual_entrega_min (minutos).",
-        "Fuente": "CSV de pedidos: tiempo_individual_entrega_min.",
-        "Frecuencia": "Semanal / mensual.",
-        "Meta": "≤ 180 min.",
-        "Umbral": "Verde ≤ 180 · Amarillo 181–220 · Rojo > 220 min.",
-        "Interpretación": "Indica el tiempo dentro del cual se entrega el 90 % de los pedidos. Depende del mix de canales: una provincia con más Programado tendrá P90 mayor sin que sea peor.",
-        "Responsable": "Gerencia de Operaciones",
-    },
-    {
-        "Indicador": "5. Productividad logística (USD por km)",
-        "Objetivo": "Evaluar cuánta venta genera cada kilómetro recorrido, como aproximación a la eficiencia de ruta. Sustituye al margen bruto, que el dataset no contiene.",
-        "Fórmula": "Σ ventas_asociadas_usd ÷ Σ distancia_km.",
-        "Fuente": "CSV de pedidos: ventas_asociadas_usd, distancia_km.",
-        "Frecuencia": "Mensual.",
-        "Meta": "≥ 2,50 USD/km.",
-        "Umbral": "Verde ≥ 2,50 · Amarillo 2,00–2,49 · Rojo < 2,00.",
-        "Interpretación": "Es un proxy de eficiencia, no de rentabilidad: no incluye costos. Un valor bajo señala rutas largas con poca venta por pedido.",
-        "Responsable": "Finanzas / Operaciones",
-    },
-]
-# ==== NUCLEO_FIN ====
-
-
-# ###########################################################################
-# SECCIÓN 2 · INTERFAZ STREAMLIT (dashboard)
-# ###########################################################################
-# ---------------------------------------------------------------------------
-# Configuración y estilo
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="LogiAndes S.A. · Monitoreo BI", page_icon="📊", layout="wide",
-                   initial_sidebar_state="collapsed")
-
-NAVY, AZUL, ACERO, GRIS, LINEA = "#0B2545", "#1D4E89", "#7F9BB8", "#6B7785", "#E3E8EF"
-COLOR_ESTADO = {"verde": "#2F7D5B", "amarillo": "#B7791F", "rojo": "#B4443C", "nd": "#9AA5B1"}
-FONDO_ESTADO = {"verde": "#E3F1EA", "amarillo": "#F7EBCF", "rojo": "#F5DCD9", "nd": "#EEF1F5"}
-TXT_ESTADO = {"verde": "En meta", "amarillo": "Seguimiento", "rojo": "Acción requerida", "nd": "Sin dato"}
-
-st.markdown(f"""
-<style>
-.block-container {{ max-width: 1360px; padding-top: 1.6rem; padding-bottom: 2rem; }}
-footer, #MainMenu {{ visibility: hidden; }}
-h1,h2,h3 {{ color: {NAVY}; letter-spacing: -0.01em; }}
-.titulo {{ font-size: 1.55rem; font-weight: 700; color: {NAVY}; margin: 0; line-height: 1.2; }}
-.subtitulo {{ font-size: .86rem; color: {GRIS}; margin: .15rem 0 .9rem 0; }}
-
-/* Navegación minimalista: pestañas con subrayado */
-div[data-testid="stTabs"] [role="tablist"] {{ gap: 1.7rem; border-bottom: 1px solid {LINEA}; }}
-div[data-testid="stTabs"] button[role="tab"] {{ padding: .55rem 0 .65rem 0; background: transparent; height: auto; }}
-div[data-testid="stTabs"] button[role="tab"] p {{ font-size: .93rem; font-weight: 500; color: {GRIS}; }}
-div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] p {{ color: {NAVY}; font-weight: 700; }}
-div[data-testid="stTabs"] div[data-baseweb="tab-highlight"] {{ background-color: {NAVY} !important; height: 2px; }}
-div[data-testid="stTabs"] div[data-baseweb="tab-border"] {{ background-color: transparent !important; }}
-
-/* Tarjetas KPI */
-.kpi {{ border: 1px solid {LINEA}; border-radius: 10px; padding: .95rem 1.05rem .85rem; background: #fff; height: 100%; }}
-.kpi-t {{ font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: {GRIS}; font-weight: 600; }}
-.kpi-v {{ font-size: 1.85rem; font-weight: 700; color: {NAVY}; line-height: 1.25; margin: .15rem 0 .05rem; }}
-.kpi-d {{ font-size: .78rem; min-height: 1.1rem; }}
-.kpi-s {{ font-size: .78rem; margin-top: .45rem; padding-top: .45rem; border-top: 1px solid {LINEA}; color: #334155; }}
-.dot {{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:.4rem; }}
-.seccion {{ font-size: 1.02rem; font-weight: 650; color: {NAVY}; margin: 1.1rem 0 .1rem; }}
-.nota {{ font-size: .78rem; color: {GRIS}; }}
-</style>
-""", unsafe_allow_html=True)
+# ==========================================
+# 1. CONFIGURACIÓN DE PÁGINA
+# ==========================================
+st.set_page_config(
+    page_title="LogiAndes S.A. · BI Dashboard",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 
 def _kw_ancho(fn):
+    """Compatibilidad entre `width="stretch"` y `use_container_width=True`."""
     try:
         p = inspect.signature(fn).parameters.get("width")
         if p is not None and p.default is not None:
@@ -346,475 +38,1289 @@ def _kw_ancho(fn):
     return {"use_container_width": True}
 
 
-AN_PLOT, AN_DF = _kw_ancho(st.plotly_chart), _kw_ancho(st.dataframe)
+AN_PLOT = _kw_ancho(st.plotly_chart)
+AN_DF = _kw_ancho(st.dataframe)
+AN_BTN = _kw_ancho(st.button)
 
 
-def num(v, d=0, pre="", suf=""):
-    """Formato regional: 1.234,5"""
-    if v is None or pd.isna(v):
-        return "N/D"
-    s = f"{v:,.{d}f}".replace(",", "§").replace(".", ",").replace("§", ".")
-    return f"{pre}{s}{suf}"
+# ==========================================
+# 2. ESTILOS Y NAVEGACIÓN FLUIDA (PILL TABS)
+# ==========================================
+def inyectar_estilos(tema_nav: str):
+    """Inyecta CSS con la barra de navegación fluida tipo cápsula e indicadores de estado."""
+    temas = {
+        "Oscuro Neón": {
+            "bar_bg": "linear-gradient(145deg, #18181b 0%, #111115 100%)",
+            "bar_border": "1px solid rgba(255, 255, 255, 0.09)",
+            "bar_shadow": "0 14px 32px rgba(0, 0, 0, 0.28), 0 4px 12px rgba(0, 0, 0, 0.18)",
+            "tab_color": "#a1a1aa",
+            "tab_hover_bg": "rgba(255, 255, 255, 0.06)",
+            "tab_hover_color": "#f4f4f5",
+            "active_bg": "radial-gradient(circle at 50% 0%, rgba(225, 29, 72, 0.30) 0%, rgba(225, 29, 72, 0.06) 75%)",
+            "active_color": "#ffffff",
+            "active_shadow": "inset 0 2.5px 0 0 #f43f5e, 0 0 18px rgba(244, 63, 94, 0.35)",
+            "dot_color": "#f43f5e",
+        },
+        "Cápsula Clara": {
+            "bar_bg": "#ffffff",
+            "bar_border": "1px solid rgba(226, 232, 240, 0.95)",
+            "bar_shadow": "0 12px 28px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.04)",
+            "tab_color": "#64748b",
+            "tab_hover_bg": "#f1f5f9",
+            "tab_hover_color": "#0f172a",
+            "active_bg": "linear-gradient(135deg, #d90429 0%, #ef233c 100%)",
+            "active_color": "#ffffff",
+            "active_shadow": "0 6px 16px rgba(217, 4, 41, 0.32)",
+            "dot_color": "#ffffff",
+        },
+        "Rojo Vibrante": {
+            "bar_bg": "linear-gradient(135deg, #c1121f 0%, #dc2626 100%)",
+            "bar_border": "1px solid rgba(255, 255, 255, 0.2)",
+            "bar_shadow": "0 14px 30px rgba(220, 38, 38, 0.30)",
+            "tab_color": "rgba(255, 255, 255, 0.82)",
+            "tab_hover_bg": "rgba(255, 255, 255, 0.12)",
+            "tab_hover_color": "#ffffff",
+            "active_bg": "rgba(255, 255, 255, 0.24)",
+            "active_color": "#ffffff",
+            "active_shadow": "0 4px 14px rgba(0, 0, 0, 0.16), inset 0 1px 1px rgba(255, 255, 255, 0.35)",
+            "dot_color": "#ffffff",
+        },
+    }
+    t = temas.get(tema_nav, temas["Oscuro Neón"])
 
+    st.markdown(
+        f"""
+        <style>
+            .block-container {{
+                padding-top: 1.3rem;
+                padding-bottom: 2.5rem;
+                max-width: 1440px;
+            }}
 
-def grafico(fig, clave, alto=340):
-    fig.update_layout(
-        height=alto, margin=dict(l=8, r=8, t=8, b=8), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Inter, Segoe UI, Arial, sans-serif", size=12, color="#334155"),
-        separators=",.", legend_title_text="", hoverlabel=dict(bgcolor="white", font_size=12),
+            .top-header {{
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 0.75rem;
+                margin-bottom: 0.55rem;
+            }}
+            .brand-box {{
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+            }}
+            .brand-badge {{
+                background: linear-gradient(135deg, #2563EB, #1D4ED8);
+                color: white;
+                font-weight: 800;
+                font-size: 1.2rem;
+                width: 42px;
+                height: 42px;
+                border-radius: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28);
+            }}
+            .main-title {{
+                font-size: 1.6rem;
+                font-weight: 800;
+                letter-spacing: -0.02em;
+                margin: 0;
+                line-height: 1.15;
+            }}
+            .sub-title {{
+                font-size: 0.85rem;
+                opacity: 0.75;
+                margin: 0;
+            }}
+
+            /* BARRA DE NAVEGACIÓN FLUIDA (PILL NAVIGATION TABS) */
+            div[data-testid="stTabs"] > div[role="tablist"] {{
+                background: {t["bar_bg"]} !important;
+                border: {t["bar_border"]} !important;
+                box-shadow: {t["bar_shadow"]} !important;
+                border-radius: 999px !important;
+                padding: 0.42rem 0.55rem !important;
+                gap: 0.4rem !important;
+                width: fit-content !important;
+                max-width: 100% !important;
+                margin: 0.3rem auto 1.15rem auto !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                overflow-x: auto !important;
+            }}
+
+            div[data-testid="stTabs"] div[data-baseweb="tab-highlight"],
+            div[data-testid="stTabs"] div[data-baseweb="tab-border"] {{
+                display: none !important;
+            }}
+
+            div[data-testid="stTabs"] button[role="tab"] {{
+                border-radius: 999px !important;
+                padding: 0.52rem 1.45rem !important;
+                min-width: 135px !important;
+                height: auto !important;
+                border: none !important;
+                background: transparent !important;
+                color: {t["tab_color"]} !important;
+                transition: all 0.28s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+                position: relative !important;
+                display: flex !important;
+                flex-direction: column !important;
+                align-items: center !important;
+                justify-content: center !important;
+            }}
+
+            div[data-testid="stTabs"] button[role="tab"] p {{
+                margin: 0 !important;
+                text-align: center !important;
+                line-height: 1.28 !important;
+                font-size: 0.82rem !important;
+                font-weight: 600 !important;
+                color: inherit !important;
+            }}
+
+            div[data-testid="stTabs"] button[role="tab"]:hover {{
+                background: {t["tab_hover_bg"]} !important;
+                color: {t["tab_hover_color"]} !important;
+                transform: translateY(-1px) !important;
+            }}
+
+            div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{
+                background: {t["active_bg"]} !important;
+                color: {t["active_color"]} !important;
+                box-shadow: {t["active_shadow"]} !important;
+                transform: scale(1.03) !important;
+            }}
+
+            div[data-testid="stTabs"] button[role="tab"][aria-selected="true"]::after {{
+                content: "";
+                width: 5px;
+                height: 5px;
+                border-radius: 50%;
+                background: {t["dot_color"]};
+                position: absolute;
+                bottom: 5px;
+                left: 50%;
+                transform: translateX(-50%);
+                box-shadow: 0 0 6px {t["dot_color"]};
+            }}
+
+            @keyframes fadeSlideUp {{
+                from {{ opacity: 0; transform: translateY(8px); }}
+                to {{ opacity: 1; transform: translateY(0); }}
+            }}
+            div[data-testid="stTabs"] div[role="tabpanel"] {{
+                animation: fadeSlideUp 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+            }}
+
+            .semaforo-pill {{
+                display: inline-block;
+                padding: 0.15rem 0.55rem;
+                border-radius: 999px;
+                font-size: 0.72rem;
+                font-weight: 600;
+                margin-top: 0.2rem;
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
-    fig.update_xaxes(gridcolor="#EEF1F5", zeroline=False, linecolor=LINEA)
-    fig.update_yaxes(gridcolor="#EEF1F5", zeroline=False, linecolor=LINEA)
-    st.plotly_chart(fig, key=clave, config={"displaylogo": False, "displayModeBar": False}, **AN_PLOT)
 
 
-def seccion(titulo, nota=None):
-    st.markdown(f"<div class='seccion'>{titulo}</div>", unsafe_allow_html=True)
-    if nota:
-        st.markdown(f"<div class='nota'>{nota}</div>", unsafe_allow_html=True)
+# ==========================================
+# 3. MODELO DE DATOS: LECTURA, ALIAS Y LIMPIEZA
+# ==========================================
+CAMPOS_CORE = ["Provincia", "Canal", "Venta_Neta", "Margen_Bruto", "Hubo_Reclamo", "Entrega_A_Tiempo"]
+CAMPOS_OPCIONALES = ["Fecha", "Ciudad", "Linea_Servicio", "Tiempo_Entrega", "Meta_Venta"]
+CAMPOS = CAMPOS_CORE + CAMPOS_OPCIONALES
+
+ALIAS = {
+    "Fecha": ["fecha", "fecha_pedido", "fecha_de_pedido", "fecha_factura", "date", "order_date"],
+    "Provincia": ["provincia", "province"],
+    "Ciudad": ["ciudad", "city"],
+    "Canal": ["canal", "canal_venta", "canal_de_venta", "channel"],
+    "Linea_Servicio": ["linea_servicio", "linea_de_servicio", "servicio", "tipo_servicio", "linea"],
+    "Venta_Neta": ["venta_neta", "ventas_netas", "ventaneta", "venta_neta_usd", "ventas_netas_usd", "net_sales"],
+    "Margen_Bruto": ["margen_bruto", "margenbruto", "margen", "utilidad_bruta", "gross_margin"],
+    "Hubo_Reclamo": ["hubo_reclamo", "reclamo", "reclamos", "tuvo_reclamo", "con_reclamo", "claim"],
+    "Entrega_A_Tiempo": ["entrega_a_tiempo", "entrega_tiempo", "a_tiempo", "entregado_a_tiempo", "on_time", "otd"],
+    "Tiempo_Entrega": [
+        "tiempo_entrega", "tiempo_de_entrega", "dias_entrega", "dias_de_entrega",
+        "horas_entrega", "lead_time", "delivery_time",
+    ],
+    "Meta_Venta": ["meta_venta", "meta_ventas", "meta", "meta_mensual", "meta_comercial", "target"],
+}
+
+SENSIBLES = ("vendedor", "cliente", "nombre", "cedula", "telefono", "correo", "email", "direccion")
 
 
-# ---------------------------------------------------------------------------
-# Datos
-# ---------------------------------------------------------------------------
-@st.cache_data(show_spinner="Cargando datos…")
-def datos():
-    return cargar_datos()
+def _limpiar(txt) -> str:
+    t = unicodedata.normalize("NFKD", str(txt)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "_", t.lower()).strip("_")
 
+
+def _leer(contenido: bytes) -> pd.DataFrame:
+    ultimo = None
+    for enc in ("utf-8-sig", "latin-1"):
+        for sep in (None, ";", ",", "\t"):
+            try:
+                df = pd.read_csv(io.BytesIO(contenido), sep=sep, engine="python", encoding=enc)
+            except Exception as e:  # noqa: BLE001
+                ultimo = e
+                continue
+            if df.shape[1] > 1:
+                return df
+    raise ValueError(f"No se pudo leer el CSV. Revisa separador y codificación. Detalle: {ultimo}")
+
+
+@st.cache_data(show_spinner="Leyendo datos…")
+def cargar_csv(contenido: bytes) -> pd.DataFrame:
+    df = _leer(contenido)
+    df.columns = [str(c).strip() for c in df.columns]
+    usados, renombrar = set(), {}
+    for col in df.columns:
+        limpia = _limpiar(col)
+        for estandar, alias in ALIAS.items():
+            if estandar in usados or limpia not in alias:
+                continue
+            if col != estandar and estandar in df.columns:
+                continue
+            renombrar[col] = estandar
+            usados.add(estandar)
+            break
+    return df.rename(columns=renombrar)
+
+
+def a_numero(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(s):
+        return s
+    t = s.astype(str).str.replace(r"[^\d,.\-]", "", regex=True)
+    if t.str.contains(r",\d{1,2}$").mean() > 0.5:
+        t = t.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    else:
+        t = t.str.replace(",", "", regex=False)
+    return pd.to_numeric(t, errors="coerce")
+
+
+def a_binario(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_bool_dtype(s):
+        return s.astype(int)
+    if pd.api.types.is_numeric_dtype(s):
+        return (pd.to_numeric(s, errors="coerce").fillna(0) > 0).astype(int)
+    t = s.astype(str).str.strip().str.lower()
+    positivos = [
+        "si", "sí", "s", "1", "true", "yes", "y", "verdadero", "a tiempo",
+        "entregado a tiempo", "on time", "ok", "cumple", "con reclamo",
+    ]
+    return t.isin(positivos).astype(int)
+
+
+def a_fecha(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s
+    t = s.astype(str).str.strip()
+    dayfirst = t.str.match(r"^\d{1,2}[/-]\d{1,2}[/-]\d{4}").mean() > 0.5
+    return pd.to_datetime(t, errors="coerce", dayfirst=dayfirst)
+
+
+PISTAS = {
+    "Fecha": {"si": {"fecha": 3, "date": 3, "pedido": 1, "factura": 1}, "no": [], "tipo": "fecha"},
+    "Provincia": {"si": {"provincia": 3, "province": 3, "prov": 1}, "no": ["meta", "id"], "tipo": "texto"},
+    "Ciudad": {"si": {"ciudad": 3, "city": 3, "canton": 3}, "no": ["id"], "tipo": "texto"},
+    "Canal": {"si": {"canal": 3, "channel": 3, "medio": 1}, "no": ["id"], "tipo": "texto"},
+    "Linea_Servicio": {"si": {"servicio": 3, "linea": 3, "service": 2, "producto": 1}, "no": ["id"], "tipo": "texto"},
+    "Venta_Neta": {
+        "si": {"neta": 4, "neto": 4, "net": 3, "venta": 2, "ventas": 2, "ingreso": 2, "monto": 1, "factur": 1, "total": 1},
+        "no": ["bruta", "bruto", "meta", "margen", "costo", "descuento", "reclamo", "tiempo", "id", "impuesto"],
+        "tipo": "numero+",
+    },
+    "Margen_Bruto": {
+        "si": {"margen": 4, "utilidad": 3, "ganancia": 3, "profit": 3, "bruto": 1, "bruta": 1},
+        "no": ["meta", "id"],
+        "tipo": "numero+",
+    },
+    "Hubo_Reclamo": {
+        "si": {"reclam": 4, "queja": 3, "claim": 3},
+        "no": ["tipo", "motivo", "tiempo", "costo", "monto", "id"],
+        "tipo": "binario",
+    },
+    "Entrega_A_Tiempo": {
+        "si": {
+            "a_tiempo": 4, "puntual": 4, "otd": 4, "on_time": 4, "ontime": 4, "sla": 3,
+            "cumpl": 2, "retras": 2, "atras": 2, "estado": 1, "tiempo": 1, "entrega": 1,
+        },
+        "no": ["id", "reclam"],
+        "tipo": "binario",
+    },
+    "Tiempo_Entrega": {
+        "si": {
+            "tiempo_entrega": 4, "tiempo_de_entrega": 4, "lead_time": 4, "dias_entrega": 4,
+            "horas_entrega": 4, "demora": 3, "transporte": 2, "tiempo": 2, "dias": 2, "horas": 2, "duracion": 2,
+        },
+        "no": ["a_tiempo", "meta", "id", "reclam"],
+        "tipo": "numero+",
+    },
+    "Meta_Venta": {
+        "si": {"meta": 4, "target": 4, "objetivo": 3, "presupuesto": 3},
+        "no": ["id", "cumpl"],
+        "tipo": "numero",
+    },
+}
+
+
+def _tipo_ok(s: pd.Series, tipo: str) -> bool:
+    s = s.dropna()
+    if s.empty:
+        return False
+    if len(s) > 2000:
+        s = s.sample(2000, random_state=0)
+    n = s.nunique()
+    if tipo == "binario":
+        return n <= 3
+    if tipo == "fecha":
+        return (not pd.api.types.is_numeric_dtype(s)) and a_fecha(s).notna().mean() >= 0.8
+    num = a_numero(s).notna().mean() >= 0.8
+    if tipo == "numero":
+        return num
+    if tipo == "numero+":
+        return num and n > 3
+    return (not num) and n <= 500
+
+
+@st.cache_data(show_spinner=False)
+def sugerir_mapeo(_df: pd.DataFrame, huella: str) -> dict:
+    candidatos = []
+    for campo in CAMPOS:
+        if campo in _df.columns:
+            continue
+        regla = PISTAS[campo]
+        for col in _df.columns:
+            if col in CAMPOS:
+                continue
+            nombre = _limpiar(col)
+            partes = set(nombre.split("_"))
+
+            def hit(t, nombre=nombre, partes=partes):
+                return (t in partes) if len(t) <= 3 else (t in nombre)
+
+            if any(hit(t) for t in regla["no"]):
+                continue
+            puntos = sum(p for t, p in regla["si"].items() if hit(t))
+            if puntos > 0 and _tipo_ok(_df[col], regla["tipo"]):
+                candidatos.append((puntos, campo, col))
+    sug, usadas = {}, set()
+    for puntos, campo, col in sorted(candidatos, reverse=True):
+        if campo not in sug and col not in usadas:
+            sug[campo] = col
+            usadas.add(col)
+    return sug
+
+
+@st.cache_data(show_spinner=False)
+def preparar_datos(_df: pd.DataFrame, huella: str, mapeo: tuple, margen_es_pct: bool) -> pd.DataFrame:
+    x = _df.copy()
+    for campo, origen in dict(mapeo).items():
+        x[campo] = x[origen]
+    for c in ("Provincia", "Ciudad", "Canal", "Linea_Servicio"):
+        if c in x:
+            x[c] = x[c].fillna("Sin dato").astype(str).str.strip()
+    for c in ("Venta_Neta", "Margen_Bruto", "Tiempo_Entrega", "Meta_Venta"):
+        if c in x:
+            x[c] = a_numero(x[c])
+    for c in ("Hubo_Reclamo", "Entrega_A_Tiempo"):
+        if c in x:
+            x[c] = a_binario(x[c])
+    if margen_es_pct and "Margen_Bruto" in x and "Venta_Neta" in x:
+        x["Margen_Bruto"] = x["Venta_Neta"] * x["Margen_Bruto"] / 100
+    if "Fecha" in x:
+        x["Fecha"] = a_fecha(x["Fecha"])
+        x["AñoMes"] = x["Fecha"].dt.strftime("%Y-%m")
+    return x
+
+
+# ==========================================
+# 4. BARRA LATERAL: ORIGEN DE DATOS Y ESTILO
+# ==========================================
+CARPETA_DEFECTO = Path(__file__).resolve().parent
+
+st.sidebar.title("🚚 LogiAndes S.A.")
+st.sidebar.caption("Sistema de Inteligencia de Negocios")
+
+with st.sidebar.expander("🎨 Estilo de navegación", expanded=True):
+    tema_nav = st.radio(
+        "Diseño de la barra de navegación",
+        ["Oscuro Neón", "Cápsula Clara", "Rojo Vibrante"],
+        index=0,
+    )
+
+inyectar_estilos(tema_nav)
+
+contenido, nombre_archivo = None, ""
+with st.sidebar.expander("⚙️ Origen de datos", expanded=True):
+    carpeta = Path(st.text_input("Carpeta de datos", value=str(CARPETA_DEFECTO))).expanduser()
+    subido = st.file_uploader("…o sube un CSV", type=["csv"], key="up_side")
+    if subido is not None:
+        contenido, nombre_archivo = subido.getvalue(), subido.name
+    else:
+        archivos = sorted(p.name for p in carpeta.glob("*.csv")) if carpeta.is_dir() else []
+        if archivos:
+            nombre_archivo = st.selectbox("Archivo", archivos)
+            contenido = (carpeta / nombre_archivo).read_bytes()
+
+if contenido is None:
+    st.markdown(
+        """
+        <div class='top-header'>
+            <div class='brand-box'>
+                <div class='brand-badge'>LA</div>
+                <div>
+                    <div class='main-title'>LogiAndes S.A. · Sistema de Inteligencia de Negocios</div>
+                    <div class='sub-title'>De visualizaciones aisladas a decisiones monitoreables</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.warning(f"No encontré archivos CSV en `{carpeta}`. Sube el dataset de LogiAndes aquí:")
+    subido_main = st.file_uploader("Sube tu CSV", type=["csv"], key="up_main")
+    if subido_main is None:
+        st.stop()
+    contenido, nombre_archivo = subido_main.getvalue(), subido_main.name
 
 try:
-    base = datos()
-except Exception as e:  # noqa: BLE001
-    st.error(f"No se pudo cargar logiandes.csv: {e}")
+    df_raw = cargar_csv(contenido)
+except ValueError as e:
+    st.error(str(e))
     st.stop()
 
-MESES_TODOS = sorted(base["mes"].unique())
-OPC_PERIODO = {f"Trimestre ({nombre_mes(MESES_TODOS[0])[:3]}–{nombre_mes(MESES_TODOS[-1])[:3]})": MESES_TODOS}
-OPC_PERIODO.update({nombre_mes(m).split()[0]: [m] for m in MESES_TODOS})
-PERIODO_DEF = next(iter(OPC_PERIODO))
-CLAVES = ["f_periodo", "f_prov", "f_canal", "f_region", "f_cliente", "f_relacion", "f_enfoque"]
+if df_raw.empty:
+    st.warning("El archivo seleccionado está vacío.")
+    st.stop()
+
+huella = hashlib.md5(contenido).hexdigest()
+sug = sugerir_mapeo(df_raw, huella)
+
+mapeo = {}
+for campo in CAMPOS:
+    clave_col = f"map_{huella[:8]}_{campo}"
+    defecto = campo if campo in df_raw.columns else sug.get(campo, "(ninguna)")
+    elegido = st.session_state.get(clave_col, defecto)
+    if elegido not in ("(ninguna)", campo) and elegido in df_raw.columns:
+        mapeo[campo] = elegido
+
+disponibles_actual = set(df_raw.columns) | set(mapeo)
+faltan_core = [c for c in CAMPOS_CORE if c not in disponibles_actual]
+
+sugiere_pct_def = False
+if "Margen_Bruto" in disponibles_actual and "Venta_Neta" in disponibles_actual:
+    try:
+        m_s = a_numero(df_raw[mapeo.get("Margen_Bruto", "Margen_Bruto")]).dropna()
+        v_s = a_numero(df_raw[mapeo.get("Venta_Neta", "Venta_Neta")]).dropna()
+        sugiere_pct_def = len(m_s) > 0 and len(v_s) > 0 and m_s.between(0, 100).all() and v_s.median() > 100
+    except Exception:  # noqa: BLE001
+        pass
+
+clave_margen = f"margen_{huella[:8]}"
+margen_es_pct = st.session_state.get(
+    clave_margen,
+    "Porcentaje (%)" if sugiere_pct_def else "Monto (US$)",
+) == "Porcentaje (%)"
+
+clave_meta = f"meta_{huella[:8]}"
+META_REPETIDA = st.session_state.get(
+    clave_meta,
+    "Repetida en cada pedido (provincia y mes)",
+).startswith("Repetida")
+
+df_base = preparar_datos(df_raw, huella, tuple(sorted(mapeo.items())), margen_es_pct)
+
+# ==========================================
+# 5. CABECERA Y FILTROS TRANSVERSALES (DOSIFICADOS)
+# ==========================================
+CLAVES_FILTROS = ["f_preset", "f_rango", "f_prov", "f_canal", "f_ciudad", "f_linea"]
 
 
-def reiniciar():
-    for k in CLAVES:
+def reiniciar_filtros():
+    for k in CLAVES_FILTROS:
         st.session_state.pop(k, None)
 
 
-# ---------------------------------------------------------------------------
-# Cabecera y filtros globales (solo tres: periodo, provincia, canal)
-# ---------------------------------------------------------------------------
-st.markdown("<div class='titulo'>LogiAndes S.A. · Monitoreo de desempeño</div>", unsafe_allow_html=True)
+def selector(label: str, opciones: list, clave: str) -> list:
+    st.session_state[clave] = [v for v in st.session_state.get(clave, []) if v in opciones]
+    if hasattr(st, "pills") and len(opciones) <= 6:
+        return list(st.pills(label, opciones, selection_mode="multi", key=clave) or [])
+    return st.multiselect(label, opciones, key=clave, placeholder="Todas")
+
+
+def aplicar(df: pd.DataFrame, col: str, seleccion: list) -> pd.DataFrame:
+    return df[df[col].isin(seleccion)] if (seleccion and col in df.columns) else df
+
+
+df_filtrado = df_base.copy()
+resumen_filtros = []
+
 st.markdown(
-    f"<div class='subtitulo'>Quito, Guayaquil, Cuenca, Manta, Ambato y Loja · pedidos de "
-    f"{nombre_mes(MESES_TODOS[0])} a {nombre_mes(MESES_TODOS[-1])} · análisis a nivel de provincia</div>",
-    unsafe_allow_html=True)
+    f"""
+    <div class='top-header'>
+        <div class='brand-box'>
+            <div class='brand-badge'>LA</div>
+            <div>
+                <div class='main-title'>LogiAndes S.A. · Monitoreo de Desempeño e Inteligencia de Negocios</div>
+                <div class='sub-title'>Cobertura: Quito, Guayaquil, Cuenca, Manta, Ambato y Loja · Fuente activa: <b>{nombre_archivo}</b></div>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
+if faltan_core:
+    st.warning(
+        "⚠️ Faltan columnas principales por asignar: **"
+        + ", ".join(faltan_core)
+        + "**. Ve a la pestaña **📋 Ficha BI & Gobernanza** para mapearlas."
+    )
+
+# Filtros principales (Nivel global: Periodo, Provincia, Canal) para evitar sobreinteractividad
 with st.container(border=True):
-    c1, c2, c3, c4 = st.columns([1.5, 2, 2, .6], vertical_alignment="bottom")
-    periodo = c1.radio("Periodo", list(OPC_PERIODO), horizontal=True, key="f_periodo")
-    sel_prov = c2.multiselect("Provincia", sorted(base["provincia"].unique()), key="f_prov", placeholder="Todas")
-    sel_canal = c3.multiselect("Canal de entrega", sorted(base["canal"].unique()), key="f_canal", placeholder="Todos")
-    c4.button("Limpiar", on_click=reiniciar, **({"width": "stretch"} if "width" in inspect.signature(st.button).parameters else {"use_container_width": True}))
+    f1, f2, f3, f4 = st.columns([1.25, 2.1, 1.65, 0.55], vertical_alignment="top")
 
-meses = OPC_PERIODO[periodo]
-ctx0 = base
-if sel_prov:
-    ctx0 = ctx0[ctx0["provincia"].isin(sel_prov)]
-if sel_canal:
-    ctx0 = ctx0[ctx0["canal"].isin(sel_canal)]
-if ctx0[ctx0["mes"].isin(meses)].empty:
-    st.warning("Los filtros no devuelven pedidos. Pulsa **Limpiar** o amplía la selección.")
+    with f1:
+        if "AñoMes" in df_filtrado.columns and df_filtrado["Fecha"].notna().any():
+            f_min, f_max = df_filtrado["Fecha"].min().date(), df_filtrado["Fecha"].max().date()
+            meses = sorted(df_filtrado["AñoMes"].dropna().unique())
+            opciones_periodo = (
+                ["Todo el periodo", "Últimos 30 días", "Últimos 90 días"]
+                + [f"Mes {m}" for m in meses]
+                + ["Personalizado"]
+            )
+            preset = st.selectbox("📅 Periodo de análisis", opciones_periodo, key="f_preset")
+            if preset == "Últimos 30 días":
+                f_ini, f_fin = max(f_min, f_max - timedelta(days=29)), f_max
+            elif preset == "Últimos 90 días":
+                f_ini, f_fin = max(f_min, f_max - timedelta(days=89)), f_max
+            elif preset.startswith("Mes "):
+                mes = preset[4:]
+                f_ini = df_filtrado.loc[df_filtrado["AñoMes"] == mes, "Fecha"].min().date()
+                f_fin = df_filtrado.loc[df_filtrado["AñoMes"] == mes, "Fecha"].max().date()
+            elif preset == "Personalizado":
+                rango = st.date_input("Rango", value=(f_min, f_max), min_value=f_min, max_value=f_max, key="f_rango")
+                f_ini, f_fin = rango if isinstance(rango, (tuple, list)) and len(rango) == 2 else (f_min, f_max)
+            else:
+                f_ini, f_fin = f_min, f_max
+            fechas = df_filtrado["Fecha"].dt.date
+            df_filtrado = df_filtrado[(fechas >= f_ini) & (fechas <= f_fin)]
+            if preset != "Todo el periodo":
+                resumen_filtros.append(f"Periodo: {f_ini:%d/%m/%Y} → {f_fin:%d/%m/%Y}")
+        else:
+            st.caption("📅 Sin columna de fecha disponible.")
+
+    with f2:
+        if "Provincia" in df_filtrado.columns:
+            sel_prov = selector("📍 Provincia", sorted(df_filtrado["Provincia"].dropna().unique()), "f_prov")
+            df_filtrado = aplicar(df_filtrado, "Provincia", sel_prov)
+            if sel_prov:
+                resumen_filtros.append("Provincia: " + ", ".join(sel_prov))
+
+    with f3:
+        if "Canal" in df_filtrado.columns:
+            sel_canal = selector("🛒 Canal de distribución", sorted(df_filtrado["Canal"].dropna().unique()), "f_canal")
+            df_filtrado = aplicar(df_filtrado, "Canal", sel_canal)
+            if sel_canal:
+                resumen_filtros.append("Canal: " + ", ".join(sel_canal))
+
+    with f4:
+        st.write("")
+        st.button("↺ Limpiar", on_click=reiniciar_filtros, **AN_BTN)
+
+pct = len(df_filtrado) / max(len(df_base), 1)
+st.caption(
+    f"📊 Mostrando **{len(df_filtrado):,}** de {len(df_base):,} pedidos ({pct:.0%})"
+    + (" · Filtros globales activos: " + " | ".join(resumen_filtros) if resumen_filtros else " · Vista nacional consolidada")
+    + " · *(Los filtros específicos de Ciudad y Línea de Servicio se encuentran en las vistas Territorial y Operativa para evitar sobreinteractividad)*."
+)
+
+if df_filtrado.empty:
+    st.warning("Los filtros actuales no devuelven resultados. Pulsa **↺ Limpiar** o amplía la selección.")
     st.stop()
 
-n_sel = int(ctx0["mes"].isin(meses).sum())
-st.markdown(f"<div class='nota'>Mostrando {num(n_sel)} de {num(len(base))} pedidos · "
-            f"{'filtros activos' if (sel_prov or sel_canal or len(meses) < len(MESES_TODOS)) else 'vista consolidada'}</div>",
-            unsafe_allow_html=True)
+base = df_base
+d = df_filtrado
+HAY_FILTROS = len(d) != len(base)
+
+# ==========================================
+# 6. FUNCIONES DE CÁLCULO, SEMÁFOROS Y FICHA TÉCNICA DE KPIS
+# ==========================================
+NOMBRE_VISIBLE = {"AñoMes": "Fecha"}
 
 
-def mes_previo(ms):
-    if len(ms) == 1:
-        i = MESES_TODOS.index(ms[0])
-        return [MESES_TODOS[i - 1]] if i > 0 else None
-    return None
+def necesita(x: pd.DataFrame, cols) -> bool:
+    falta = [NOMBRE_VISIBLE.get(c, c) for c in cols if c not in x.columns]
+    if falta:
+        st.info(f"Para este gráfico falta: **{', '.join(falta)}**. Configúrala en **📋 Ficha BI & Gobernanza**.")
+        return False
+    return True
 
 
-# ---------------------------------------------------------------------------
-# Componentes reutilizables
-# ---------------------------------------------------------------------------
-def tarjeta(col, titulo, valor_txt, clave_kpi, valor, meta_txt, delta_html=""):
-    est = estado(clave_kpi, valor)
-    c = COLOR_ESTADO[est]
-    col.markdown(
-        f"<div class='kpi'><div class='kpi-t'>{titulo}</div><div class='kpi-v'>{valor_txt}</div>"
-        f"<div class='kpi-d'>{delta_html}</div>"
-        f"<div class='kpi-s'><span class='dot' style='background:{c}'></span><b style='color:{c}'>{TXT_ESTADO[est]}</b>"
-        f" · <span style='color:{GRIS}'>{meta_txt}</span></div></div>", unsafe_allow_html=True)
+def mostrar(fig, clave: str, alto: int = 370):
+    fig.update_layout(height=alto, margin=dict(l=10, r=10, t=28, b=10), legend_title_text="")
+    st.plotly_chart(fig, key=clave, config={"displaylogo": False}, **AN_PLOT)
 
 
-def delta(act, prev, dec=1, suf="", mejor="alto", pct=False):
-    if prev is None or pd.isna(prev) or pd.isna(act):
-        return ""
-    dif = (act / prev - 1) * 100 if pct else act - prev
-    bueno = (dif >= 0) if mejor == "alto" else (dif <= 0)
-    c = COLOR_ESTADO["verde"] if bueno else COLOR_ESTADO["rojo"]
-    flecha = "▲" if dif >= 0 else "▼"
-    return f"<span style='color:{c}'>{flecha} {num(abs(dif), dec)}{suf}</span> <span style='color:{GRIS}'>vs. mes anterior</span>"
+def meta_por(x: pd.DataFrame, por=None):
+    if "Meta_Venta" not in x:
+        return None
+    por = list(por or [])
+    if META_REPETIDA and "Provincia" in x and "AñoMes" in x:
+        llaves = por + [c for c in ("Provincia", "AñoMes") if c not in por]
+        celdas = x.groupby(llaves)["Meta_Venta"].first()
+        return celdas.groupby(level=por).sum() if por else celdas.sum()
+    return x.groupby(por)["Meta_Venta"].sum() if por else x["Meta_Venta"].sum()
 
 
-def tabla_semaforo(r, idx_col):
-    """Tabla de KPIs por territorio con celdas coloreadas según el umbral de la ficha."""
-    sem = semaforo_por(r)
-    vis = pd.DataFrame({
-        idx_col.capitalize(): r[idx_col],
-        "Cumplimiento meta": [num(v, 1, suf=" %") for v in r["cumplimiento"]],
-        "Reclamos/1.000": [num(v, 1) + (" ⚠" if n < MIN_EVENTOS else "") for v, n in zip(r["reclamos"], r["reclamos_n"])],
-        "Entrega a tiempo": [num(v, 1, suf=" %") for v in r["otd"]],
-        "P90 entrega (min)": [num(v, 0) for v in r["p90"]],
-        "USD por km": [num(v, 2) for v in r["prod"]],
-    })
-    mapa = dict(zip(vis.columns[1:], KPIS))
-
-    def css(_):
-        out = pd.DataFrame("", index=vis.index, columns=vis.columns)
-        for colv, kk in mapa.items():
-            out[colv] = [f"background-color:{FONDO_ESTADO[e]};color:#1F2A37" for e in sem[kk]]
-        return out
-
-    st.dataframe(vis.style.apply(css, axis=None), hide_index=True, **AN_DF)
+def resumen_por(x: pd.DataFrame, col: str) -> pd.DataFrame:
+    g = x.groupby(col)
+    r = pd.DataFrame({"Pedidos": g.size()})
+    if "Venta_Neta" in x:
+        r["Venta_Neta"] = g["Venta_Neta"].sum()
+        if "Margen_Bruto" in x:
+            r["Margen_%"] = g["Margen_Bruto"].sum() / r["Venta_Neta"].replace(0, np.nan) * 100
+        if "Meta_Venta" in x and col in ("Provincia", "AñoMes"):
+            meta = meta_por(x, [col]).reindex(r.index)
+            r["Cumplimiento_%"] = r["Venta_Neta"] / meta.replace(0, np.nan) * 100
+    if "Hubo_Reclamo" in x:
+        r["Reclamos_x1000"] = g["Hubo_Reclamo"].sum() / r["Pedidos"] * 1000
+    if "Entrega_A_Tiempo" in x:
+        r["OTD_%"] = g["Entrega_A_Tiempo"].mean() * 100
+    if "Tiempo_Entrega" in x:
+        r["Tiempo_medio"] = g["Tiempo_Entrega"].mean()
+    return r.reset_index()
 
 
-# ---------------------------------------------------------------------------
-# 1. VISIÓN EJECUTIVA
-# ---------------------------------------------------------------------------
-def pagina_ejecutiva():
-    k = calcular_kpis(ctx0, meses)
-    pm = mes_previo(meses)
-    kp = calcular_kpis(ctx0, pm) if pm else None
-    g = (lambda x: kp[x]) if kp else (lambda x: None)
+def calcular_kpis(x: pd.DataFrame) -> dict:
+    n = len(x)
+    k = {"pedidos": n}
+    if "Venta_Neta" in x:
+        k["venta"] = x["Venta_Neta"].sum()
+        if "Margen_Bruto" in x:
+            k["margen_monto"] = x["Margen_Bruto"].sum()
+            k["margen_pct"] = k["margen_monto"] / k["venta"] * 100 if k["venta"] > 0 else np.nan
+        if "Meta_Venta" in x:
+            meta = meta_por(x)
+            k["meta_total"] = meta
+            k["cumplimiento"] = k["venta"] / meta * 100 if meta and meta > 0 else np.nan
+    if "Hubo_Reclamo" in x and n:
+        k["reclamos"] = x["Hubo_Reclamo"].sum() / n * 1000
+    if "Entrega_A_Tiempo" in x and n:
+        k["otd"] = x["Entrega_A_Tiempo"].mean() * 100
+    return k
 
-    cols = st.columns(5)
-    cumpl_txt = ("Meta ≥ 100 % de la referencia" if pd.notna(k["cumplimiento"])
-                 else "Mes base: sin meta de referencia")
-    tarjeta(cols[0], "Ventas · cumplimiento", num(k["ventas"], 0, "$"), "cumplimiento", k["cumplimiento"],
-            f"Cumplimiento {num(k['cumplimiento'], 1, suf=' %')}" if pd.notna(k["cumplimiento"]) else cumpl_txt,
-            delta(k["ventas_dia"], g("ventas_dia"), 1, " % ventas/día", pct=True) if kp else "")
-    tarjeta(cols[1], "Reclamos / 1.000 pedidos", num(k["reclamos"], 1), "reclamos", k["reclamos"], "Meta ≤ 25",
-            delta(k["reclamos"], g("reclamos"), 1, "", mejor="bajo") if kp else "")
-    tarjeta(cols[2], "Entrega a tiempo", num(k["otd"], 1, suf=" %"), "otd", k["otd"], "Meta ≥ 90 %",
-            delta(k["otd"], g("otd"), 1, " pp") if kp else "")
-    tarjeta(cols[3], "Tiempo de entrega P90", num(k["p90"], 0, suf=" min"), "p90", k["p90"], "Meta ≤ 180 min",
-            delta(k["p90"], g("p90"), 0, " min", mejor="bajo") if kp else "")
-    tarjeta(cols[4], "Productividad logística", num(k["prod"], 2, suf=" USD/km"), "prod", k["prod"], "Meta ≥ 2,50",
-            delta(k["prod"], g("prod"), 2, "") if kp else "")
 
-    r = resumen_por(ctx0, meses, "provincia")
-    sem = semaforo_por(r)
-    rojas = r.loc[(sem == "rojo").any(axis=1), "provincia"].tolist()
-    if len(r) > 1:
-        msg = (f"**{len(rojas)} de {len(r)} provincias** tienen al menos un indicador en rojo: {', '.join(rojas)}."
-               if rojas else "Ninguna provincia tiene indicadores en rojo en la selección actual.")
-        st.markdown(f"<div style='margin:.9rem 0 .1rem'>{msg}</div>", unsafe_allow_html=True)
-
-    a, b = st.columns([1.15, 1])
-    with a:
-        seccion("Semáforo por provincia", "Color según los umbrales de la ficha técnica. ⚠ = menos de 20 reclamos (tasa poco estable).")
-        tabla_semaforo(r, "provincia")
-    with b:
-        seccion("Ventas vs. meta de referencia por mes", "La serie mensual no depende del filtro de periodo; sí de provincia y canal.")
-        m = resumen_mensual(ctx0)
-        fig = go.Figure()
-        fig.add_bar(x=[nombre_mes(x) for x in m["mes"]], y=m["ventas"], name="Ventas", marker_color=AZUL,
-                    text=[num(v, 0, "$") for v in m["ventas"]], textposition="outside")
-        fig.add_scatter(x=[nombre_mes(x) for x in m["mes"]], y=m["meta"], name="Meta de referencia", mode="lines+markers",
-                        line=dict(color="#B7791F", dash="dash"), connectgaps=False)
-        fig.update_yaxes(title="USD", rangemode="tozero")
-        fig.update_layout(legend=dict(orientation="h", y=1.12, x=0))
-        grafico(fig, "ej_serie", 320)
-
-    seccion("Acciones sugeridas", "Prioridad alta = indicador en rojo; media = en seguimiento. Derivadas automáticamente de los umbrales.")
-    filas = []
-    for i, fila in r.iterrows():
-        for kk in KPIS:
-            e = sem.loc[i, kk]
-            if e in ("rojo", "amarillo"):
-                u = KPIS[kk]
-                extra = " (muestra baja: confirmar con más datos)" if kk == "reclamos" and fila["reclamos_n"] < MIN_EVENTOS else ""
-                filas.append({"Prioridad": "Alta" if e == "rojo" else "Media", "Provincia": fila["provincia"],
-                              "Indicador": u["nombre"], "Valor": num(fila[kk], u["dec"], suf=u["unidad"]),
-                              "Meta": num(u["verde"], u["dec"], suf=u["unidad"]), "Acción sugerida": ACCIONES[kk] + extra})
-    if filas:
-        acc = pd.DataFrame(filas)
-        acc["_o"] = acc["Prioridad"].map({"Alta": 0, "Media": 1})
-        st.dataframe(acc.sort_values(["_o", "Provincia"]).drop(columns="_o"), hide_index=True, height=300, **AN_DF)
+def evaluar_umbral(valor, verde, amarillo, menor_es_mejor=False):
+    """Evalúa el estado del KPI según umbrales de la ficha técnica."""
+    if valor is None or pd.isna(valor):
+        return "⚪ Sin dato", "#64748b", "rgba(100,116,139,0.12)"
+    if not menor_es_mejor:
+        if valor >= verde:
+            return "🟢 Óptimo (En meta)", "#16a34a", "rgba(22,163,74,0.12)"
+        if valor >= amarillo:
+            return "🟡 Alerta (Seguimiento)", "#d97706", "rgba(217,119,6,0.12)"
+        return "🔴 Crítico (Acción requerida)", "#dc2626", "rgba(220,38,38,0.12)"
     else:
-        st.success("Sin acciones pendientes en la selección actual.")
-    st.caption("Límite interpretativo: estas lecturas describen asociaciones en los registros internos. Cualquier contraste con "
-               "indicadores del BCE o del INEC mostraría coincidencia temporal, no causalidad.")
+        if valor <= verde:
+            return "🟢 Óptimo (Controlado)", "#16a34a", "rgba(22,163,74,0.12)"
+        if valor <= amarillo:
+            return "🟡 Alerta (Atención)", "#d97706", "rgba(217,119,6,0.12)"
+        return "🔴 Crítico (Excede umbral)", "#dc2626", "rgba(220,38,38,0.12)"
 
 
-# ---------------------------------------------------------------------------
-# 2. DIAGNÓSTICO TERRITORIAL
-# ---------------------------------------------------------------------------
+def tarjeta_kpi(col, etiqueta, valor, fmt, ref=None, inverso=False, ayuda="", unidad="", sem=None):
+    with col.container(border=True):
+        if valor is None or pd.isna(valor):
+            st.metric(etiqueta, "N/D", help=ayuda or "Falta la columna necesaria para este KPI.")
+            return
+        delta = None
+        if HAY_FILTROS and ref is not None and not pd.isna(ref):
+            delta = f"{valor - ref:+,.1f}{unidad} vs. nacional"
+        st.metric(
+            etiqueta,
+            fmt.format(valor),
+            delta=delta,
+            delta_color="inverse" if inverso else "normal",
+            help=ayuda or None,
+        )
+        if sem:
+            txt_s, col_s, bg_s = sem
+            st.markdown(
+                f"<span class='semaforo-pill' style='color:{col_s};background:{bg_s};'>{txt_s}</span>",
+                unsafe_allow_html=True,
+            )
+
+
+K = calcular_kpis(d)
+K0 = calcular_kpis(base)
+
+# FICHA TÉCNICA COMPLETA DE LOS 5 KPIS (Cumple los 9 atributos exigidos en la Prueba Práctica 2)
+FICHA_TECNICA_KPIS = pd.DataFrame([
+    {
+        "Nombre del Indicador": "1. Ventas Netas (US$)",
+        "Objetivo": "Cuantificar los ingresos reales efectivos descontando devoluciones e impuestos para alinear el criterio financiero y comercial.",
+        "Fórmula": "Σ Venta_Neta",
+        "Fuente": "ERP Facturación / CSV de pedidos (Venta_Neta)",
+        "Frecuencia": "Mensual / Monitoreo continuo",
+        "Meta": "≥ 100 % del presupuesto comercial asignado al territorio",
+        "Umbral (Semáforo)": "🟢 ≥ 95 % de meta | 🟡 85 % – 94.9 % | 🔴 < 85 %",
+        "Interpretación": "Mide la tracción comercial real por provincia y canal; evita sobreestimar ingresos al excluir ventas brutas anuladas o con nota de crédito.",
+        "Responsable": "Finanzas / Dirección Comercial",
+    },
+    {
+        "Nombre del Indicador": "2. Margen Bruto (%)",
+        "Objetivo": "Monitorear la rentabilidad directa de las operaciones logísticas tras cubrir los costos directos de distribución.",
+        "Fórmula": "(Σ Margen_Bruto ÷ Σ Venta_Neta) × 100",
+        "Fuente": "Contabilidad Analítica / CSV de pedidos (Margen_Bruto, Venta_Neta)",
+        "Frecuencia": "Mensual",
+        "Meta": "≥ 25.0 % sobre ventas netas",
+        "Umbral (Semáforo)": "🟢 ≥ 25.0 % | 🟡 18.0 % – 24.9 % | 🔴 < 18.0 %",
+        "Interpretación": "Permite detectar provincias o canales con alto volumen de ventas pero baja rentabilidad por sobrecostos de última milla o descuentos excesivos.",
+        "Responsable": "Gerencia Financiera",
+    },
+    {
+        "Nombre del Indicador": "3. Cumplimiento de Meta Comercial (%)",
+        "Objetivo": "Evaluar el grado de alcance de los objetivos comerciales mensuales por provincia sin duplicar metas por pedido.",
+        "Fórmula": "(Σ Venta_Neta ÷ Meta_Mensual_Provincia) × 100",
+        "Fuente": "Presupuesto Comercial y Facturación (Venta_Neta, Meta_Venta)",
+        "Frecuencia": "Mensual",
+        "Meta": "≥ 100.0 %",
+        "Umbral (Semáforo)": "🟢 ≥ 95.0 % | 🟡 85.0 % – 94.9 % | 🔴 < 85.0 %",
+        "Interpretación": "Compara el desempeño real frente a la cuota esperada del periodo; corrige la desconexión entre hojas de metas y cierres de facturación.",
+        "Responsable": "Dirección Comercial / Gerencia General",
+    },
+    {
+        "Nombre del Indicador": "4. Tasa de Reclamos por 1.000 Pedidos",
+        "Objetivo": "Estandarizar la medición de incidencias de servicio al cliente relativizando por el volumen operativo de cada territorio.",
+        "Fórmula": "(Σ Hubo_Reclamo ÷ Total_Pedidos) × 1.000",
+        "Fuente": "CRM Atención al Cliente / CSV de pedidos (Hubo_Reclamo)",
+        "Frecuencia": "Semanal / Mensual",
+        "Meta": "≤ 25.0 reclamos por cada 1.000 pedidos",
+        "Umbral (Semáforo)": "🟢 ≤ 25.0 | 🟡 25.1 – 50.0 | 🔴 > 50.0 por 1.000 pedidos",
+        "Interpretación": "Evita comparaciones injustas entre provincias de alto volumen (ej. Quito/Guayaquil) y plazas medianas (ej. Loja/Ambato) usando tasas en lugar de conteos absolutos.",
+        "Responsable": "Atención al Cliente",
+    },
+    {
+        "Nombre del Indicador": "5. Entrega a Tiempo – OTD (%)",
+        "Objetivo": "Medir la confiabilidad y puntualidad del servicio logístico frente a la promesa de entrega pactada con los comercios.",
+        "Fórmula": "(Pedidos con Entrega_A_Tiempo = 1 ÷ Total_Pedidos) × 100",
+        "Fuente": "TMS Operaciones / CSV de pedidos (Entrega_A_Tiempo)",
+        "Frecuencia": "Diaria / Semanal / Mensual",
+        "Meta": "≥ 90.0 % de pedidos entregados a tiempo",
+        "Umbral (Semáforo)": "🟢 ≥ 90.0 % | 🟡 80.0 % – 89.9 % | 🔴 < 80.0 %",
+        "Interpretación": "Refleja la salud operativa de las rutas urbanas y regionales; debe analizarse junto con el P90 y el coeficiente de variación de tiempos de entrega.",
+        "Responsable": "Gerencia de Operaciones",
+    },
+])
+
+
+# ==========================================
+# 7. DESARROLLO DE LAS 4 VISTAS DEL DASHBOARD
+# ==========================================
+def pagina_ejecutiva():
+    """NIVEL 1: Vista Ejecutiva (Gerencia General y Finanzas)."""
+    t1, t2, t3, t4, t5 = st.columns(5)
+
+    sem_cumpl = evaluar_umbral(K.get("cumplimiento"), 95.0, 85.0, menor_es_mejor=False)
+    sem_margen = evaluar_umbral(K.get("margen_pct"), 25.0, 18.0, menor_es_mejor=False)
+    sem_recl = evaluar_umbral(K.get("reclamos"), 25.0, 50.0, menor_es_mejor=True)
+    sem_otd = evaluar_umbral(K.get("otd"), 90.0, 80.0, menor_es_mejor=False)
+
+    tarjeta_kpi(
+        t1, "1. Ventas netas", K.get("venta"), "${:,.0f}",
+        ayuda="Ingresos netos efectivos (Σ Venta_Neta). Criterio unificado con Finanzas.",
+        sem=sem_cumpl if K.get("cumplimiento") is not None else None,
+    )
+    tarjeta_kpi(
+        t2, "2. Margen bruto", K.get("margen_pct"), "{:.1f}%", K0.get("margen_pct"), unidad=" pp",
+        ayuda=f"Σ Margen_Bruto ÷ Σ Venta_Neta. Utilidad bruta acumulada: ${K.get('margen_monto', 0):,.0f}",
+        sem=sem_margen,
+    )
+    tarjeta_kpi(
+        t3, "3. Cumplimiento meta", K.get("cumplimiento"), "{:.1f}%", K0.get("cumplimiento"), unidad=" pp",
+        ayuda="Ventas netas ÷ Meta comercial única por provincia y mes.",
+        sem=sem_cumpl,
+    )
+    tarjeta_kpi(
+        t4, "4. Reclamos / 1.000", K.get("reclamos"), "{:.1f}", K0.get("reclamos"), inverso=True,
+        ayuda="Pedidos con reclamo por cada 1.000 pedidos (tasa estandarizada).",
+        sem=sem_recl,
+    )
+    tarjeta_kpi(
+        t5, "5. Entrega a tiempo (OTD)", K.get("otd"), "{:.1f}%", K0.get("otd"), unidad=" pp",
+        ayuda="Porcentaje de pedidos entregados dentro del SLA prometido.",
+        sem=sem_otd,
+    )
+
+    if "Provincia" in d and d["Provincia"].nunique() > 1:
+        r = resumen_por(d, "Provincia")
+        msgs = []
+        if "Venta_Neta" in r and r["Venta_Neta"].sum() > 0:
+            t = r.loc[r["Venta_Neta"].idxmax()]
+            msgs.append(f"💰 **Concentración comercial:** **{t['Provincia']}** aporta el {t['Venta_Neta'] / r['Venta_Neta'].sum():.0%} de las ventas netas.")
+        if "Cumplimiento_%" in r and r["Cumplimiento_%"].notna().any():
+            t = r.loc[r["Cumplimiento_%"].idxmin()]
+            msgs.append(f"🎯 **Brecha de meta:** **{t['Provincia']}** registra el menor cumplimiento ({t['Cumplimiento_%']:.1f}%).")
+        if "Reclamos_x1000" in r and r["Reclamos_x1000"].notna().any():
+            t = r.loc[r["Reclamos_x1000"].idxmax()]
+            msgs.append(f"📣 **Foco de atención al cliente:** **{t['Provincia']}** presenta la mayor tasa relativa ({t['Reclamos_x1000']:.1f} reclamos / 1.000 pedidos).")
+        if "OTD_%" in r and r["OTD_%"].notna().any():
+            t = r.loc[r["OTD_%"].idxmin()]
+            msgs.append(f"⏱️ **Alerta logística:** **{t['Provincia']}** tiene el menor OTD ({t['OTD_%']:.1f}%).")
+        if msgs:
+            st.info(" · ".join(msgs))
+            st.caption(
+                "⚠️ **Límite interpretativo (Gobernanza):** Estas lecturas describen asociaciones observadas en los registros internos de LogiAndes S.A. "
+                "Variaciones coincidentes con indicadores del BCE o INEC no demuestran causalidad directa sin un diseño econométrico o experimental adicional."
+            )
+
+    c1, c2 = st.columns([1, 1.3])
+    with c1:
+        with st.container(border=True):
+            st.subheader("Ventas netas por provincia")
+            if necesita(d, ["Provincia", "Venta_Neta"]):
+                r = resumen_por(d, "Provincia").sort_values("Venta_Neta")
+                fig = px.bar(
+                    r, x="Venta_Neta", y="Provincia", orientation="h",
+                    color="Venta_Neta", color_continuous_scale="Blues", text_auto=".3s",
+                )
+                fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="Ventas netas (US$)")
+                mostrar(fig, "p1_ventas_prov")
+    with c2:
+        with st.container(border=True):
+            st.subheader("Evolución mensual de ventas netas vs. Meta comercial")
+            if necesita(d, ["AñoMes", "Venta_Neta"]):
+                m = d.groupby("AñoMes", as_index=False)["Venta_Neta"].sum().sort_values("AñoMes")
+                fig = px.line(m, x="AñoMes", y="Venta_Neta", markers=True)
+                fig.update_traces(name="Ventas netas", showlegend=True)
+                meta_m = meta_por(d, ["AñoMes"])
+                if meta_m is not None:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=m["AñoMes"],
+                            y=meta_m.reindex(m["AñoMes"]).values,
+                            name="Meta mensual",
+                            mode="lines+markers",
+                            line=dict(dash="dash", color="#F59E0B"),
+                        )
+                    )
+                fig.update_layout(xaxis_title=None, yaxis_title="US$")
+                mostrar(fig, "p1_serie")
+
+    c3, c4 = st.columns(2)
+    with c3:
+        with st.container(border=True):
+            st.subheader("Tasa de reclamos por 1.000 pedidos (Umbral ≤ 25)")
+            if necesita(d, ["Provincia", "Hubo_Reclamo"]):
+                r = resumen_por(d, "Provincia").sort_values("Reclamos_x1000")
+                fig = px.bar(
+                    r, x="Reclamos_x1000", y="Provincia", orientation="h",
+                    color="Reclamos_x1000", color_continuous_scale="Reds", text_auto=".1f",
+                )
+                fig.add_vline(x=25, line_dash="dash", line_color="#16a34a", annotation_text="Meta ≤ 25")
+                fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="Reclamos / 1.000 pedidos")
+                mostrar(fig, "p1_reclamos")
+    with c4:
+        with st.container(border=True):
+            cab_otd, inp_otd = st.columns([1.6, 1])
+            with cab_otd:
+                st.subheader("Entrega a tiempo (OTD %) por provincia")
+            with inp_otd:
+                meta_otd = st.number_input("Meta OTD (%)", 0, 100, 90, key="meta_otd")
+            if necesita(d, ["Provincia", "Entrega_A_Tiempo"]):
+                r = resumen_por(d, "Provincia").sort_values("OTD_%")
+                fig = px.bar(
+                    r, x="OTD_%", y="Provincia", orientation="h",
+                    color="OTD_%", color_continuous_scale="RdYlGn", text_auto=".1f",
+                )
+                fig.add_vline(x=meta_otd, line_dash="dash", annotation_text=f"Meta {meta_otd}%")
+                fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="% entregado a tiempo")
+                mostrar(fig, "p1_otd", alto=325)
+
+    if "Meta_Venta" in d and "Provincia" in d and "Venta_Neta" in d:
+        with st.container(border=True):
+            st.subheader("Cumplimiento de meta comercial por provincia (%)")
+            r = resumen_por(d, "Provincia").dropna(subset=["Cumplimiento_%"]).sort_values("Cumplimiento_%")
+            if not r.empty:
+                fig = px.bar(
+                    r, x="Cumplimiento_%", y="Provincia", orientation="h",
+                    color="Cumplimiento_%", color_continuous_scale="RdYlGn", text_auto=".1f",
+                )
+                fig.add_vline(x=100, line_dash="dash", annotation_text="Meta 100%")
+                fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="Ventas netas ÷ meta (%)")
+                mostrar(fig, "p1_cumplimiento", alto=310)
+
+
 def pagina_territorial():
-    with st.container(border=True):
-        t1, t2 = st.columns([1.2, 2])
-        sel_reg = t1.multiselect("Región", sorted(base["region"].unique()), key="f_region", placeholder="Todas")
-        opciones = ["Pedidos vs. reclamos", "Tiempo de entrega vs. reclamos"]
-        if hasattr(st, "segmented_control"):
-            relacion = t2.segmented_control("Relación a explorar", opciones, default=opciones[0], key="f_relacion") or opciones[0]
-        else:
-            relacion = t2.radio("Relación a explorar", opciones, horizontal=True, key="f_relacion")
-    ctx = ctx0[ctx0["region"].isin(sel_reg)] if sel_reg else ctx0
-    d = ctx[ctx["mes"].isin(meses)]
-    if d.empty:
-        st.warning("Sin pedidos para la región seleccionada.")
+    """NIVEL 2: Diagnóstico Territorial (Dirección Comercial y Atención al Cliente)."""
+    if not necesita(d, ["Provincia", "Canal"]):
         return
-    r = resumen_por(ctx, meses, "provincia")
 
-    a, b = st.columns(2)
-    with a:
-        seccion("Ventas por provincia (USD)")
-        t = r.sort_values("ventas")
-        fig = go.Figure(go.Bar(x=t["ventas"], y=t["provincia"], orientation="h", marker_color=AZUL,
-                               text=[num(v, 0, "$") for v in t["ventas"]], textposition="outside", cliponaxis=False))
-        fig.update_xaxes(title="USD", rangemode="tozero")
-        grafico(fig, "te_ventas")
-    with b:
-        seccion("Reclamos por 1.000 pedidos, con intervalo de confianza 95 %",
-                "Las barras de error muestran la incertidumbre: con pocos eventos la tasa es inestable.")
-        t = r.sort_values("reclamos")
-        fig = go.Figure(go.Bar(
-            x=t["reclamos"], y=t["provincia"], orientation="h",
-            marker_color=[COLOR_ESTADO[estado("reclamos", v)] for v in t["reclamos"]],
-            error_x=dict(type="data", symmetric=False, array=t["ic_sup"] - t["reclamos"], arrayminus=t["reclamos"] - t["ic_inf"],
-                         color="#475569", thickness=1.2),
-            text=[num(v, 1) for v in t["reclamos"]], textposition="inside", insidetextanchor="start",
-            textfont=dict(color="white")))
-        fig.add_vline(x=25, line_dash="dash", line_color=COLOR_ESTADO["verde"], annotation_text="Meta 25")
-        fig.add_vline(x=50, line_dash="dash", line_color=COLOR_ESTADO["rojo"], annotation_text="Rojo 50")
-        fig.update_xaxes(title="Reclamos por 1.000 pedidos", rangemode="tozero")
-        grafico(fig, "te_reclamos")
+    # Filtro progresivo propio del Nivel 2 (Ciudad) según diseño de Camila Andrade
+    d_terr = d.copy()
+    with st.container(border=True):
+        ct1, ct2, ct3 = st.columns([1.5, 2.0, 1.1])
+        with ct1:
+            if "Ciudad" in d_terr.columns:
+                ciudades_disp = sorted(d_terr["Ciudad"].dropna().unique())
+                sel_ciudad = st.multiselect(
+                    "🏙️ Filtro de Nivel 2 · Ciudad / Cantón",
+                    ciudades_disp,
+                    key="f_ciudad",
+                    placeholder="Todas las ciudades del territorio",
+                )
+                d_terr = aplicar(d_terr, "Ciudad", sel_ciudad)
+            else:
+                st.caption("🏙️ Sin desglose por ciudad en este archivo.")
 
-    c, e = st.columns(2)
-    with c:
-        seccion("Entrega a tiempo por provincia y canal (%)", "Escala fija ligada a los umbrales: rojo < 80, ámbar 80–90, verde ≥ 90.")
-        piv = d.pivot_table(index="provincia", columns="canal", values="a_tiempo", aggfunc="mean") * 100
-        npv = d.pivot_table(index="provincia", columns="canal", values="a_tiempo", aggfunc="size")
-        fig = go.Figure(go.Heatmap(
-            z=piv.values, x=piv.columns, y=piv.index, zmin=60, zmax=100, customdata=npv.values,
-            text=[[num(v, 0, suf="%") for v in fila] for fila in piv.values], texttemplate="%{text}",
-            textfont=dict(color="white", size=13), xgap=3, ygap=3, showscale=False,
-            colorscale=[[0, COLOR_ESTADO["rojo"]], [.5, COLOR_ESTADO["rojo"]], [.5, COLOR_ESTADO["amarillo"]],
-                        [.75, COLOR_ESTADO["amarillo"]], [.75, COLOR_ESTADO["verde"]], [1, COLOR_ESTADO["verde"]]],
-            hovertemplate="%{y} · %{x}<br>OTD: %{z:.1f}%<br>Pedidos: %{customdata}<extra></extra>"))
-        fig.update_yaxes(autorange="reversed")
-        grafico(fig, "te_heat")
-    with e:
-        if relacion == "Pedidos vs. reclamos":
-            seccion("Pedidos vs. reclamos por provincia y mes", "Cada punto es una provincia en un mes (continuidad con la clase anterior).")
-            pm_ = d.groupby(["provincia", "mes"]).agg(pedidos=("pedido_id", "size"), rec=("reclamos", "sum")).reset_index()
-            pm_["tasa"] = pm_["rec"] / pm_["pedidos"] * 1000
-            fig = px.scatter(pm_, x="pedidos", y="tasa", color="provincia", color_discrete_sequence=px.colors.qualitative.Safe,
-                             hover_data={"mes": True})
-            fig.update_traces(marker=dict(size=11, line=dict(width=1, color="white")))
-            fig.update_layout(xaxis_title="Pedidos en el mes", yaxis_title="Reclamos por 1.000 pedidos")
-            grafico(fig, "te_sc1")
-            if len(pm_) >= 5:
-                rho = pm_[["pedidos", "tasa"]].corr(method="spearman").iloc[0, 1]
-                st.caption(f"Correlación de Spearman = {num(rho, 2)} con n = {len(pm_)} puntos. Una asociación débil o inestable "
-                           "con tan pocos puntos no permite concluir que el volumen cause más o menos reclamos.")
-        else:
-            seccion("Tiempo medio de entrega vs. reclamos por provincia", "Tamaño del punto = pedidos.")
-            fig = px.scatter(r, x="t_medio", y="reclamos", size="pedidos", text="provincia", size_max=38)
-            fig.update_traces(marker=dict(color=AZUL, opacity=.8, line=dict(width=1, color="white")), textposition="top center")
-            fig.update_layout(xaxis_title="Tiempo medio de entrega (min)", yaxis_title="Reclamos por 1.000 pedidos")
-            grafico(fig, "te_sc2")
-            if len(r) >= 5:
-                rho = r[["t_medio", "reclamos"]].corr(method="spearman").iloc[0, 1]
-                st.caption(f"Correlación de Spearman = {num(rho, 2)} con n = {len(r)} provincias. Con solo {len(r)} observaciones "
-                           "es una pista para investigar, no una prueba de causalidad.")
+        opciones_vista = [
+            "🎛️ Vista integrada",
+            "🌞 Composición (Sunburst)",
+            "🔥 Mapa de calor",
+            "🎯 Pedidos vs. reclamos",
+            "📋 Tabla comparativa",
+        ]
+        opciones_metrica = ["Pedidos"] + (["Ventas netas"] if "Venta_Neta" in d_terr else [])
 
-    seccion("Tabla comparativa por provincia")
-    t = r.copy()
-    t["confianza"] = np.where(t["reclamos_n"] < MIN_EVENTOS, "Baja (<20 reclamos)", "Aceptable")
-    t = t.sort_values("ventas", ascending=False)[["provincia", "pedidos", "ventas", "ticket", "cumplimiento", "reclamos_n",
-                                                    "reclamos", "ic_inf", "ic_sup", "confianza", "otd", "p90", "prod"]]
-    st.dataframe(t, hide_index=True, **AN_DF, column_config={
-        "provincia": "Provincia", "pedidos": st.column_config.NumberColumn("Pedidos", format="%d"),
-        "ventas": st.column_config.NumberColumn("Ventas (USD)", format="$ %.0f"),
-        "ticket": st.column_config.NumberColumn("Ticket (USD)", format="$ %.2f"),
-        "cumplimiento": st.column_config.NumberColumn("Cumplimiento meta (%)", format="%.1f"),
-        "reclamos_n": st.column_config.NumberColumn("Reclamos (n)", format="%d"),
-        "reclamos": st.column_config.NumberColumn("Reclamos/1.000", format="%.1f"),
-        "ic_inf": st.column_config.NumberColumn("IC 95 % inf.", format="%.1f"),
-        "ic_sup": st.column_config.NumberColumn("IC 95 % sup.", format="%.1f"),
-        "confianza": "Confianza de la tasa",
-        "otd": st.column_config.NumberColumn("OTD (%)", format="%.1f"),
-        "p90": st.column_config.NumberColumn("P90 (min)", format="%.0f"),
-        "prod": st.column_config.NumberColumn("USD/km", format="%.2f"),
-    })
+        with ct2:
+            if hasattr(st, "segmented_control"):
+                vista_terr = st.segmented_control(
+                    "Visualización territorial",
+                    opciones_vista,
+                    default=opciones_vista[0],
+                    key="seg_terr",
+                ) or opciones_vista[0]
+            else:
+                vista_terr = st.selectbox("Visualización territorial", opciones_vista, key="rad_terr")
+        with ct3:
+            metrica = st.radio("Métrica de volumen", opciones_metrica, horizontal=True, key="met_terr")
 
+    if d_terr.empty:
+        st.warning("No hay pedidos para la ciudad seleccionada.")
+        return
 
-# ---------------------------------------------------------------------------
-# 3. DETALLE OPERATIVO
-# ---------------------------------------------------------------------------
-def acceso_analista() -> bool:
-    try:
-        codigo = st.secrets.get("ACCESS_CODE", "analista2026")
-    except Exception:  # noqa: BLE001
-        codigo = "analista2026"
-    return st.text_input("Código de acceso (analistas)", type="password", key="f_codigo",
-                         help="Control de acceso de demostración. En producción se reemplazaría por autenticación corporativa.") == codigo
+    def render_sunburst(alto=400):
+        with st.container(border=True):
+            st.subheader("🌞 Participación por Provincia y Canal")
+            if metrica == "Ventas netas":
+                fig = px.sunburst(d_terr[d_terr["Venta_Neta"] > 0], path=["Provincia", "Canal"], values="Venta_Neta")
+            else:
+                fig = px.sunburst(d_terr, path=["Provincia", "Canal"])
+            fig.update_traces(textinfo="label+percent parent")
+            mostrar(fig, "p2_sunburst", alto=alto)
+
+    def render_calor(alto=400):
+        with st.container(border=True):
+            st.subheader("🔥 Matriz de Intensidad: Provincia × Canal")
+            if metrica == "Ventas netas":
+                piv = pd.crosstab(d_terr["Provincia"], d_terr["Canal"], values=d_terr["Venta_Neta"], aggfunc="sum").fillna(0)
+            else:
+                piv = pd.crosstab(d_terr["Provincia"], d_terr["Canal"])
+            fig = px.imshow(piv, text_auto=".2s", aspect="auto", color_continuous_scale="Blues")
+            fig.update_layout(xaxis_title=None, yaxis_title=None)
+            mostrar(fig, "p2_calor", alto=alto)
+
+    def render_scatter(alto=400):
+        with st.container(border=True):
+            st.subheader("🎯 Relación Volumen de Pedidos vs. Tasa de Reclamos (Continuidad Clase 1)")
+            if necesita(d_terr, ["Hubo_Reclamo"]):
+                r = resumen_por(d_terr, "Provincia")
+                tamano = r["Venta_Neta"].fillna(0).clip(lower=0) if "Venta_Neta" in r else None
+                fig = px.scatter(
+                    r, x="Pedidos", y="Reclamos_x1000", size=tamano,
+                    color="OTD_%" if "OTD_%" in r else None,
+                    text="Provincia", color_continuous_scale="RdYlGn", size_max=45,
+                )
+                fig.update_traces(textposition="top center")
+                fig.update_layout(xaxis_title="Volumen de Pedidos", yaxis_title="Reclamos por 1.000 pedidos")
+                mostrar(fig, "p2_scatter", alto=alto)
+                st.caption(
+                    "Prevención de sesgo visual: El eje Y mide la tasa por cada 1.000 pedidos (no el conteo bruto), "
+                    "permitiendo comparar justamente territorios con distinto volumen de operación."
+                )
+
+    def render_tabla():
+        with st.container(border=True):
+            st.subheader("📋 Desempeño Integral Comparativo por Territorio")
+            r = resumen_por(d_terr, "Provincia")
+            if "Venta_Neta" in r:
+                r = r.sort_values("Venta_Neta", ascending=False)
+            st.dataframe(
+                r,
+                hide_index=True,
+                **AN_DF,
+                column_config={
+                    "Venta_Neta": st.column_config.NumberColumn("Ventas netas", format="$ %.0f"),
+                    "Margen_%": st.column_config.ProgressColumn("Margen (%)", min_value=0, max_value=100, format="%.1f"),
+                    "Cumplimiento_%": st.column_config.NumberColumn("Cumplimiento (%)", format="%.1f"),
+                    "Reclamos_x1000": st.column_config.NumberColumn("Reclamos / 1.000", format="%.1f"),
+                    "OTD_%": st.column_config.ProgressColumn("Entrega a tiempo (%)", min_value=0, max_value=100, format="%.1f"),
+                    "Tiempo_medio": st.column_config.NumberColumn("Tiempo medio", format="%.1f"),
+                },
+            )
+
+    if vista_terr == "🎛️ Vista integrada":
+        g1, g2 = st.columns(2)
+        with g1:
+            render_sunburst(alto=370)
+        with g2:
+            render_calor(alto=370)
+        render_scatter(alto=380)
+        render_tabla()
+    elif vista_terr == "🌞 Composición (Sunburst)":
+        render_sunburst(alto=480)
+    elif vista_terr == "🔥 Mapa de calor":
+        render_calor(alto=450)
+    elif vista_terr == "🎯 Pedidos vs. reclamos":
+        render_scatter(alto=460)
+    else:
+        render_tabla()
 
 
 def pagina_operativa():
+    """NIVEL 3: Detalle Operativo (Gerencia de Operaciones y Consulta Granular Gobernada)."""
+    d_op = d.copy()
+
+    # Filtro progresivo propio del Nivel 3 (Línea de Servicio) + Control de Rol de Gobernanza
     with st.container(border=True):
-        o1, o2 = st.columns([1.6, 1.4])
-        sel_cli = o1.multiselect("Tipo de cliente", sorted(base["tipo_cliente"].unique()), key="f_cliente", placeholder="Todos")
-        enfoque = o2.selectbox("Enfoque del explorador de pedidos",
-                               ["Todos los pedidos", "Solo con reclamo", "Solo fuera de SLA"], key="f_enfoque")
-    ctx = ctx0[ctx0["tipo_cliente"].isin(sel_cli)] if sel_cli else ctx0
-    d = ctx[ctx["mes"].isin(meses)]
-    if d.empty:
-        st.warning("Sin pedidos para el tipo de cliente seleccionado.")
+        co1, co2, co3 = st.columns([1.8, 1.4, 1.4], vertical_alignment="bottom")
+        with co1:
+            if "Linea_Servicio" in d_op.columns:
+                lineas_disp = sorted(d_op["Linea_Servicio"].dropna().unique())
+                sel_linea = st.multiselect(
+                    "📦 Filtro de Nivel 3 · Línea de servicio logístico",
+                    lineas_disp,
+                    key="f_linea",
+                    placeholder="Todas las líneas (Urbana, Regional, Express…)",
+                )
+                d_op = aplicar(d_op, "Linea_Servicio", sel_linea)
+            else:
+                st.caption("📦 Sin columna de Línea de Servicio en el archivo.")
+        with co2:
+            filtro_incidencia = st.selectbox(
+                "🔎 Filtro operativo de pedidos",
+                ["Todos los pedidos", "Solo con reclamo", "Solo entregas tardías (OTD = 0)"],
+            )
+        with co3:
+            rol_autorizado = st.toggle(
+                "🔓 Vista auditor autorizado (Mostrar vendedor/cliente)",
+                value=False,
+                help="Simula el criterio de gobernanza de Camila: por defecto se anonimizan datos de vendedores y clientes.",
+            )
+
+    if d_op.empty:
+        st.warning("No hay registros para la línea de servicio seleccionada.")
         return
 
-    a, b = st.columns(2)
-    with a:
-        seccion("Tiempo de entrega por provincia (minutos)", "La caja muestra mediana y rango intercuartílico; los puntos son atípicos.")
-        fig = px.box(d, x="provincia", y="t_entrega", points="outliers", color_discrete_sequence=[AZUL])
-        fig.update_layout(xaxis_title=None, yaxis_title="Minutos")
-        grafico(fig, "op_box_prov")
-    with b:
-        seccion("Tiempo de entrega por canal vs. SLA (minutos)", "La marca roja indica el SLA supuesto de cada canal.")
-        fig = px.box(d, x="canal", y="t_entrega", points="outliers", color_discrete_sequence=[ACERO])
-        canales = sorted(d["canal"].unique())
-        fig.add_scatter(x=canales, y=[SLA_MIN[c] for c in canales], mode="markers", name="SLA",
-                        marker=dict(symbol="line-ew", size=64, line=dict(width=3, color=COLOR_ESTADO["rojo"])))
-        fig.update_layout(xaxis_title=None, yaxis_title="Minutos", showlegend=False)
-        grafico(fig, "op_box_canal")
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.container(border=True):
+            st.subheader("Distribución y dispersión del tiempo de entrega (Boxplot)")
+            if necesita(d_op, ["Provincia", "Tiempo_Entrega"]):
+                fig = px.box(
+                    d_op.dropna(subset=["Tiempo_Entrega"]),
+                    x="Provincia", y="Tiempo_Entrega", color="Provincia", points="outliers",
+                )
+                fig.update_layout(showlegend=False, xaxis_title=None, yaxis_title="Tiempo de entrega")
+                mostrar(fig, "p3_box")
+                st.caption("Supera la limitación de mirar solo promedios: expone mediana, rango intercuartílico y valores atípicos.")
+    with c2:
+        with st.container(border=True):
+            st.subheader("Entrega a tiempo (OTD %) por canal y servicio")
+            if necesita(d_op, ["Canal", "Entrega_A_Tiempo"]):
+                r = resumen_por(d_op, "Canal").sort_values("OTD_%")
+                fig = px.bar(
+                    r, x="OTD_%", y="Canal", orientation="h",
+                    color="OTD_%", color_continuous_scale="RdYlGn", text_auto=".1f",
+                )
+                fig.add_vline(x=90, line_dash="dash", annotation_text="Meta 90%")
+                fig.update_layout(coloraxis_showscale=False, yaxis_title=None, xaxis_title="% entregado a tiempo")
+                mostrar(fig, "p3_otd_canal")
 
-    c, e = st.columns([1.15, 1])
-    with c:
-        seccion("Variabilidad logística por provincia")
-        v = d.groupby("provincia").agg(media=("t_entrega", "mean"), mediana=("t_entrega", "median"),
-                                       p90=("t_entrega", lambda s: s.quantile(.9)), desv=("t_entrega", "std"),
-                                       fuera=("a_tiempo", lambda s: (1 - s.mean()) * 100)).reset_index()
-        v["cv"] = v["desv"] / v["media"] * 100
-        st.dataframe(v.sort_values("cv", ascending=False), hide_index=True, **AN_DF, column_config={
-            "provincia": "Provincia", "media": st.column_config.NumberColumn("Media (min)", format="%.1f"),
-            "mediana": st.column_config.NumberColumn("Mediana (min)", format="%.1f"),
-            "p90": st.column_config.NumberColumn("P90 (min)", format="%.0f"),
-            "desv": st.column_config.NumberColumn("Desv. est.", format="%.1f"),
-            "fuera": st.column_config.NumberColumn("Fuera de SLA (%)", format="%.1f"),
-            "cv": st.column_config.NumberColumn("Coef. variación (%)", format="%.1f")})
-        st.caption("El coeficiente de variación (desviación ÷ media) mide la inestabilidad relativa de las entregas.")
-    with e:
-        seccion("Motivos de reclamo (Pareto)")
-        mo = d[d["reclamos"] == 1]["motivo"].value_counts().reset_index()
-        mo.columns = ["motivo", "n"]
-        if mo.empty:
-            st.info("No hay reclamos en la selección.")
-        else:
-            mo["acum"] = mo["n"].cumsum() / mo["n"].sum() * 100
-            fig = go.Figure()
-            fig.add_bar(x=mo["motivo"], y=mo["n"], marker_color=AZUL, name="Reclamos")
-            fig.add_scatter(x=mo["motivo"], y=mo["acum"], yaxis="y2", mode="lines+markers", name="% acumulado",
-                            line=dict(color="#B7791F"))
-            fig.update_layout(yaxis=dict(title="Reclamos"), yaxis2=dict(overlaying="y", side="right", range=[0, 105], showgrid=False,
-                                                                       title="% acumulado"), legend=dict(orientation="h", y=1.15))
-            fig.update_xaxes(tickangle=-25)
-            grafico(fig, "op_pareto", 310)
+    if "Provincia" in d_op and "Tiempo_Entrega" in d_op:
+        with st.container(border=True):
+            st.subheader("Estadísticos de variabilidad logística por provincia")
+            var = (
+                d_op.groupby("Provincia")["Tiempo_Entrega"]
+                .agg(Media="mean", Mediana="median", P90=lambda s: s.quantile(0.9), Desv_Est="std")
+                .reset_index()
+            )
+            var["Coef_Var_%"] = (var["Desv_Est"] / var["Media"].replace(0, np.nan)) * 100
+            st.dataframe(var.round(2).sort_values("Coef_Var_%", ascending=False), hide_index=True, **AN_DF)
+            st.caption(
+                "El Coeficiente de Variación (Desv_Est ÷ Media) identifica qué territorios sufren mayor inestabilidad en entregas. "
+                "P90 indica el tiempo máximo dentro del cual se completa el 90 % de los pedidos."
+            )
 
-    seccion("Explorador de pedidos (acceso restringido)",
-            "El dataset no contiene datos personales, pero el detalle por pedido es información operativa y queda tras un control de acceso.")
-    if acceso_analista():
-        vista = d
-        if enfoque == "Solo con reclamo":
-            vista = vista[vista["reclamos"] == 1]
-        elif enfoque == "Solo fuera de SLA":
-            vista = vista[vista["a_tiempo"] == 0]
-        vista = vista[["pedido_id", "fecha", "provincia", "canal", "tipo_cliente", "t_entrega", "sla_min", "a_tiempo",
-                       "reclamos", "motivo", "ventas", "km"]].sort_values("fecha")
-        st.caption(f"{num(len(vista))} pedidos · se muestran los primeros 1.000.")
-        st.dataframe(vista.head(1000), hide_index=True, height=320, **AN_DF)
-        st.download_button("Descargar selección (CSV)", vista.to_csv(index=False).encode("utf-8-sig"),
-                           "pedidos_seleccion.csv", "text/csv")
-    else:
-        st.info("Introduce el código de acceso para ver el detalle de pedidos. Código de la demostración: ver README.")
+    # Explorador de pedidos con gobernanza de datos sensibles
+    with st.container(border=True):
+        st.subheader("🔎 Explorador trazable de pedidos individuales")
+        sensibles = [c for c in d_op.columns if any(s in _limpiar(c) for s in SENSIBLES)]
+        vista = d_op.copy()
+        if filtro_incidencia == "Solo con reclamo" and "Hubo_Reclamo" in vista.columns:
+            vista = vista[vista["Hubo_Reclamo"] == 1]
+        elif filtro_incidencia.startswith("Solo entregas tardías") and "Entrega_A_Tiempo" in vista.columns:
+            vista = vista[vista["Entrega_A_Tiempo"] == 0]
+
+        if not rol_autorizado and sensibles:
+            vista = vista.drop(columns=sensibles)
+            st.caption(
+                f"🔒 **Gobernanza activa (Vista estándar):** Se han ocultado las columnas `{', '.join(sensibles)}` "
+                "para proteger datos personales y evitar rankings punitivos sin contexto."
+            )
+        elif rol_autorizado and sensibles:
+            st.warning(
+                f"🔓 **Modo Auditor Autorizado activo:** Visualizando columnas sensibles (`{', '.join(sensibles)}`). "
+                "Uso exclusivo para auditoría operativa interna."
+            )
+
+        st.dataframe(vista, height=360, **AN_DF)
+        st.download_button(
+            "📥 Descargar vista actual (CSV)",
+            data=vista.to_csv(index=False).encode("utf-8-sig"),
+            file_name="reporte_logiandes_gobernado.csv",
+            mime="text/csv",
+        )
 
 
-# ---------------------------------------------------------------------------
-# 4. METODOLOGÍA Y GOBERNANZA
-# ---------------------------------------------------------------------------
-def pagina_metodologia():
-    seccion("1. Problema empresarial y audiencias")
-    st.markdown(
-        "LogiAndes S.A. creció con información dispersa: cada área usa sus propias cifras (ventas brutas o netas, tiempos "
-        "promedio sin dispersión, reclamos sin relación con el volumen, metas separadas de la facturación). Este dashboard "
-        "integra una única definición de cada indicador para **monitorear, interpretar y actuar**.")
-    st.dataframe(pd.DataFrame([
-        ["Gerencia general", "Saber si se cumplen los objetivos", "Visión Ejecutiva: 5 KPI con semáforo y acciones sugeridas"],
-        ["Dirección comercial", "Comparar territorios, canal y periodo", "Filtros de periodo, provincia y canal; Diagnóstico Territorial"],
-        ["Operaciones", "Detectar retrasos y alta variabilidad", "Detalle Operativo: boxplots, P90, coeficiente de variación, SLA"],
-        ["Finanzas", "Una sola definición de ventas y eficiencia", "Ventas con meta de referencia y productividad USD/km (el dataset no trae margen)"],
-        ["Atención al cliente", "Comparar reclamos sin sesgo de volumen", "Tasa por 1.000 pedidos con IC 95 % y Pareto de motivos"],
-    ], columns=["Audiencia", "Necesidad", "Respuesta en el dashboard"]), hide_index=True, **AN_DF)
-
-    seccion("2. Fichas técnicas de los KPI")
-    for f in FICHAS:
-        with st.expander(f["Indicador"]):
-            for kk in ("Objetivo", "Fórmula", "Fuente", "Frecuencia", "Meta", "Umbral", "Interpretación", "Responsable"):
-                st.markdown(f"**{kk}:** {f[kk]}")
-
-    seccion("3. Supuestos y limitaciones de los datos")
-    st.markdown(
-        f"- **Ventas.** El dataset trae `ventas_asociadas_usd`; no distingue ventas brutas de netas ni incluye costos, por lo que no hay margen bruto. "
-        "Se usa la productividad USD/km como aproximación de eficiencia.\n"
-        f"- **Meta.** No existe en los datos. Se define una *meta de referencia*: ventas diarias de {nombre_mes(MES_BASE)} × días del mes × "
-        f"{1 + META_CRECIMIENTO:.2f}. Se calcula con el mismo subconjunto filtrado, y {nombre_mes(MES_BASE)} queda sin meta.\n"
-        f"- **SLA.** Supuesto por canal ({', '.join(f'{c} {m} min' for c, m in SLA_MIN.items())}), calibrado con la distribución histórica; "
-        "por eso el OTD nacional informa poco y la comparación entre territorios es lo valioso.\n"
-        "- **Territorio.** El nivel disponible es provincia (Pichincha, Guayas, Azuay, Manabí, Tungurahua, Loja); no hay ciudad ni línea de servicio. "
-        "El canal de entrega (Estándar urbano, Express, Programado) cumple el papel de tipo de servicio.\n"
-        "- **Periodo.** Solo tres meses de datos: no permite estacionalidad ni tendencias robustas.")
-
-    seccion("4. Reflexión: riesgos y límites")
-    a, b = st.columns(2)
-    with a:
+def pagina_ficha_y_gobernanza():
+    """MÓDULO DOCUMENTAL: Cumple todos los requisitos conceptuales y metodológicos de la Prueba Práctica 2."""
+    # 1. Descripción del problema y matriz de audiencias
+    with st.container(border=True):
+        st.subheader("1. Diagnóstico del Problema Empresarial y Necesidades por Audiencia")
         st.markdown(
-            "**Sobreinteractividad.** Se limitan los controles: 3 filtros globales (periodo, provincia, canal) y como máximo 2 locales por vista. "
-            "No se ofrecen filtros por cliente o pedido en las vistas agregadas; más controles fragmentarían la muestra (algunas provincias tienen menos de 20 reclamos) y aumentarían la carga cognitiva.\n\n"
-            "**Sesgos visuales.** Los reclamos se expresan como tasa y no como conteo, para no culpar a las provincias grandes. Las escalas de color están fijadas a los umbrales "
-            "(no al mínimo y máximo de los datos), los ejes de barras parten de cero, y las tasas se muestran con intervalo de confianza. Los boxplots evitan que el promedio oculte las colas.")
-    with b:
-        st.markdown(
-            "**Privacidad.** El dataset no contiene nombres, cédulas ni identificadores de clientes o vendedores; solo `pedido_id`. Las vistas ejecutiva y territorial son agregadas, y el detalle por pedido queda tras un código de acceso.\n\n"
-            "**Gobernanza.** El control de acceso es de demostración; en producción requiere autenticación y permisos por rol. Cada KPI tiene definición, fuente, responsable y umbrales documentados, y el cálculo de KPIs vive en un solo bloque (sección 1 de este archivo), reutilizado tal cual por el Notebook.\n\n"
-            "**Límites interpretativos.** Los indicadores muestran asociaciones, no causas. Contrastar con datos del BCE o el INEC solo mostraría coincidencias. Con 6 provincias y 3 meses, las correlaciones son exploratorias. "
-            "El semáforo depende de umbrales y metas supuestos, que deben validarse con las áreas.")
+            """
+            **Problema empresarial en LogiAndes S.A.:** La empresa opera en **Quito, Guayaquil, Cuenca, Manta, Ambato y Loja** atendiendo a comercios medianos, pero su rápido crecimiento dejó la información fragmentada en hojas de cálculo aisladas y criterios semánticos contradictorios (Comercial reportaba *ventas brutas*, Finanzas *ventas netas*, Operaciones solo miraba *tiempos promedio* sin dispersión, Atención al Cliente contaba *reclamos absolutos* sin relativizar por volumen, y las *metas comerciales* estaban desconectadas de los periodos de facturación).
+            """
+        )
+        audiencias_df = pd.DataFrame([
+            {
+                "Audiencia": "1. Gerencia General",
+                "Necesidad de Información": "Monitorear si la empresa cumple sus objetivos estratégicos nacionales y territoriales.",
+                "Respuesta en el Dashboard": "Vista Ejecutiva (Nivel 1) con 5 tarjetas KPI semaforizadas, cumplimiento de meta mensual y serie temporal.",
+            },
+            {
+                "Audiencia": "2. Dirección Comercial",
+                "Necesidad de Información": "Analizar el desempeño comercial filtrando por provincia, ciudad, línea de servicio y periodo.",
+                "Respuesta en el Dashboard": "Filtros jerárquicos en 3 niveles, Sunburst y Mapa de calor Provincia × Canal, y seguimiento de metas.",
+            },
+            {
+                "Audiencia": "3. Gerencia de Operaciones",
+                "Necesidad de Información": "Identificar territorios y canales con retrasos o alta variabilidad en los tiempos de entrega.",
+                "Respuesta en el Dashboard": "Detalle Operativo (Nivel 3) con Boxplots de tiempos, OTD (%), P90 y Coeficiente de Variación provincial.",
+            },
+            {
+                "Audiencia": "4. Área Financiera",
+                "Necesidad de Información": "Unificar el criterio de ingresos en Ventas Netas e incorporar el Margen Bruto real.",
+                "Respuesta en el Dashboard": "Cálculo estandarizado de Ventas Netas (US$) y Margen Bruto (% y monto) en tarjetas y tablas comparativas.",
+            },
+            {
+                "Audiencia": "5. Atención al Cliente",
+                "Necesidad de Información": "Evaluar reclamos mediante tasas relativas para evitar comparaciones injustas entre provincias de distinto tamaño.",
+                "Respuesta en el Dashboard": "KPI de Tasa de Reclamos por 1.000 pedidos y gráfico de dispersión Volumen de Pedidos vs. Tasa de Reclamos.",
+            },
+        ])
+        st.dataframe(audiencias_df, hide_index=True, **AN_DF)
+        st.caption(
+            "**Estrategia de herramientas (Tensión 2 del caso):** Se utiliza **Streamlit** para este prototipo funcional ágil en Python; "
+            "**Gradio** se reserva para consultas acotadas de resumen puntual; y **Power BI / Tableau** para la futura distribución corporativa con seguridad a nivel de fila (RLS)."
+        )
 
-    seccion("5. Herramienta")
-    st.markdown("Streamlit permite iterar rápido sobre datos ya procesados en Python y validar estructura, filtros e indicadores con la gerencia. "
-                "La definición de KPIs queda desacoplada de la interfaz, por lo que podría migrarse más adelante a una herramienta de distribución corporativa.")
+    # 2. Ficha técnica completa de los 5 KPIs
+    with st.container(border=True):
+        st.subheader("2. Ficha Técnica Oficial de los 5 KPIs (Modelo Semántico Unificado)")
+        st.dataframe(FICHA_TECNICA_KPIS, hide_index=True, **AN_DF)
 
-    with st.expander("Calidad de los datos"):
-        cal = pd.DataFrame({"Columna": base.columns, "Nulos (%)": [round(base[c].isna().mean() * 100, 1) for c in base.columns],
-                            "Valores únicos": [int(base[c].nunique()) for c in base.columns]})
-        st.dataframe(cal, hide_index=True, **AN_DF)
-        st.caption(f"{num(len(base))} pedidos · del {base['fecha'].min():%d/%m/%Y} al {base['fecha'].max():%d/%m/%Y}.")
+    # 3. Reflexión sobre los 4 pilares exigidos en la Prueba Práctica 2
+    with st.container(border=True):
+        st.subheader("3. Marco de Gobernanza, Ética y Límites Interpretativos")
+        r1, r2 = st.columns(2)
+        with r1:
+            st.markdown(
+                """
+                * **🎛️ Prevención de sobreinteractividad:** Colocar 10 filtros simultáneos (provincia, ciudad, canal, cliente, vendedor, estado, tipo de reclamo, etc.) fragmenta la muestra y produce fatiga cognitiva. Por ello, este dashboard aplica **revelación progresiva en 3 niveles**: filtros estratégicos arriba (Periodo, Provincia, Canal), filtro táctico de **Ciudad** en el Nivel 2 (Territorial) y filtro operativo de **Línea de Servicio** e incidencias en el Nivel 3 (Operativo).
+                * **👁️ Mitigación de sesgos visuales:** Reportar conteos absolutos de reclamos sesga la atención hacia Quito y Guayaquil solo por su tamaño. El dashboard corrige este sesgo utilizando **tasas por cada 1.000 pedidos**, **Boxplots** (para no ocultar la dispersión detrás del promedio) y líneas de referencia explícitas en metas (100 % comercial, 90 % OTD y ≤ 25 reclamos/1.000).
+                """
+            )
+        with r2:
+            st.markdown(
+                """
+                * **🔒 Privacidad y gobernanza de datos:** En cumplimiento del principio de mínimo privilegio, las vistas Ejecutiva y Territorial presentan datos agregados por provincia y canal. En el Nivel Operativo, los identificadores de **vendedores, clientes o contactos** se enmascaran automáticamente por defecto y solo pueden habilitarse mediante el conmutador de *Auditor Autorizado*, evitando rankings punitivos sin contexto.
+                * **📉 Límites interpretativos y fuentes externas (BCE / INEC):** Aunque se contraste la serie mensual de ventas con indicadores macroeconómicos del **Banco Central del Ecuador (BCE)** o del **INEC**, una caída simultánea muestra **asociación temporal, no causalidad**. Atribuir variaciones internas al entorno macro requiere aislar factores logísticos internos (como quiebres de ruta o caídas de OTD).
+                """
+            )
+
+    # 4. Configuración técnica de columnas y calidad del dataset
+    with st.expander("🧩 Configuración técnica de mapeo de columnas y auditoría de calidad del CSV"):
+        opciones_col = ["(ninguna)"] + list(df_raw.columns)
+        grid = st.columns(3)
+        for i, campo in enumerate(CAMPOS):
+            defecto = campo if campo in df_raw.columns else sug.get(campo, "(ninguna)")
+            etiqueta = campo + (" *" if campo in CAMPOS_CORE else " (opcional)")
+            grid[i % 3].selectbox(
+                etiqueta,
+                opciones_col,
+                index=opciones_col.index(defecto) if defecto in opciones_col else 0,
+                key=f"map_{huella[:8]}_{campo}",
+            )
+
+        ajustes = st.columns(2)
+        if "Margen_Bruto" in disponibles_actual:
+            ajustes[0].radio(
+                "Margen_Bruto está expresado como…",
+                ["Monto (US$)", "Porcentaje (%)"],
+                index=1 if sugiere_pct_def else 0,
+                key=clave_margen,
+            )
+        if "Meta_Venta" in disponibles_actual:
+            ajustes[1].radio(
+                "Meta_Venta se registra…",
+                ["Repetida en cada pedido (provincia y mes)", "Un valor por pedido (se suma)"],
+                key=clave_meta,
+            )
+
+        cols_ok = [c for c in CAMPOS + ["AñoMes"] if c in base.columns]
+        calidad = pd.DataFrame({
+            "Columna estándar": cols_ok,
+            "Valores nulos (%)": [round(base[c].isna().mean() * 100, 1) for c in cols_ok],
+            "Cardinalidad (únicos)": [int(base[c].nunique(dropna=True)) for c in cols_ok],
+        })
+        st.dataframe(calidad, hide_index=True, **AN_DF)
+        st.caption(f"Total registros cargados: **{len(base):,}** · Duplicados exactos: **{int(base.duplicated().sum()):,}**")
 
 
-# ---------------------------------------------------------------------------
-# Navegación
-# ---------------------------------------------------------------------------
-t_ej, t_te, t_op, t_me = st.tabs(["Visión ejecutiva", "Diagnóstico territorial", "Detalle operativo", "Metodología y gobernanza"])
-with t_ej:
+# ==========================================
+# 8. BARRA DE NAVEGACIÓN PRINCIPAL FLUIDA
+# ==========================================
+tab_ej, tab_te, tab_op, tab_bi = st.tabs([
+    "🏛️  \n1. Visión Ejecutiva",
+    "🗺️  \n2. Diagnóstico Territorial",
+    "🔧  \n3. Detalle Operativo",
+    "📋  \n4. Ficha BI & Gobernanza",
+])
+
+with tab_ej:
     pagina_ejecutiva()
-with t_te:
+with tab_te:
     pagina_territorial()
-with t_op:
+with tab_op:
     pagina_operativa()
-with t_me:
-    pagina_metodologia()
+with tab_bi:
+    pagina_ficha_y_gobernanza()
+
+st.divider()
+st.caption(
+    "LogiAndes S.A. © 2026 · Solución de Business Intelligence en Streamlit · "
+    "Visualización, Storytelling y Business Intelligence (Prueba Práctica 2)."
+)
